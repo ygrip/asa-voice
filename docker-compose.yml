@@ -1,0 +1,54 @@
+# Standalone compose for local sidecar dev/testing. In the full stack, the sidecar is added to
+# setara-platform/docker-compose.yml as an internal-only service (no public port) — see setara-ouda.
+services:
+  asa-voice:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: asa-voice
+    ports:
+      - "8090:8090"   # local dev only; remove/empty in production
+    environment:
+      STT_MODEL: distil-small.en
+      STT_DEVICE: cpu
+      STT_COMPUTE_TYPE: int8
+      STT_LANGUAGE: en
+      STT_CPU_THREADS: 4
+      STT_NUM_WORKERS: 1
+      STT_BEAM_SIZE: 1
+      STT_BEST_OF: 1
+      STT_VAD_FILTER: "true"
+      MAX_AUDIO_SECONDS: 20
+      MAX_UPLOAD_MB: 15
+      MAX_CONCURRENT_STT: 1
+      MAX_CONCURRENT_TTS: 1
+      TTS_ENGINE: pocket-tts
+      TTS_DEFAULT_MODEL: pocket-low
+      TTS_DEFAULT_VOICE: asa_default
+      TTS_MAX_TEXT_CHARS: 600
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 2G
+        reservations:
+          cpus: "1.0"
+          memory: 1G
+    # docker compose (non-Swarm) honors these more reliably than deploy.resources:
+    mem_limit: 2g
+    cpus: 4
+    volumes:
+      - asa_voice_cache:/root/.cache
+      - asa_voice_tmp:/tmp/asa-voice
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # First start downloads the pocket-tts + whisper models from HuggingFace into the cache volume.
+      start_period: 180s
+    restart: unless-stopped
+
+volumes:
+  asa_voice_cache:
+  asa_voice_tmp:

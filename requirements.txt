@@ -1,0 +1,11 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+# pocket-tts requires python-multipart>=0.0.21
+python-multipart>=0.0.21
+# faster-whisper 1.1.x supports numpy 2 (1.0.x pinned numpy<2 and conflicts with pocket-tts).
+faster-whisper==1.1.1
+pydantic-settings==2.5.2
+# pocket-tts (Kyutai) requires numpy>=2 and pulls torch>=2.5, scipy, huggingface-hub, etc.
+# torch is installed CPU-only in the Dockerfile to avoid the large CUDA wheel.
+numpy>=2.0,<3
+pocket-tts==2.1.0

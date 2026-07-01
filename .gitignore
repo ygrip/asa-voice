@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+models/*
+!models/.gitkeep
+tmp/*
+!tmp/.gitkeep
+*.wav
