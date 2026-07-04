@@ -16,9 +16,17 @@ class Settings(BaseSettings):
     # Use all cores for CTranslate2 decode — the single biggest CPU latency win.
     stt_cpu_threads: int = 4
     stt_num_workers: int = 1
-    # Greedy (beam 1) keeps STT fast.
-    stt_beam_size: int = 1
-    stt_best_of: int = 1
+    # Partial decode is display-only and optimized for first-text latency.
+    stt_partial_beam_size: int = 1
+    stt_partial_best_of: int = 1
+    stt_partial_word_timestamps: bool = True
+    stt_partial_vad_filter: bool = False
+    # Final decode is the command-execution transcript and favors accuracy.
+    stt_final_beam_size: int = 3
+    stt_final_best_of: int = 3
+    stt_final_word_timestamps: bool = False
+    stt_final_vad_filter: bool = True
+    stt_final_condition_on_previous: bool = False
     stt_vad_filter: bool = True
     # Decode-quality knobs: drop silence/hallucinations, don't carry context between clips (faster,
     # avoids the model "completing" a previous sentence into the next short command).
@@ -69,8 +77,15 @@ class Settings(BaseSettings):
     # client. 1 = lowest latency, more frames; higher = fewer/bigger frames.
     tts_stream_coalesce: int = 1
 
+    # Auth: comma-separated "client_id:secret" pairs (same format as asa-rust-voice).
+    # Empty = open / dev mode (no key required).
+    allowed_clients: str = ""
+
     # Resource guards (protect the 4 CPU / 3 GB capped container)
+    # max_audio_seconds: rolling-window buffer cap per utterance in streaming STT
+    # max_upload_seconds: limit for file-upload STT (longer recordings are fine)
     max_audio_seconds: int = 20
+    max_upload_seconds: int = 300
     max_upload_mb: int = 15
     max_concurrent_stt: int = 1
     max_concurrent_tts: int = 1

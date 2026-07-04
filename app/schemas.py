@@ -29,10 +29,24 @@ class VoiceInfo(BaseModel):
     language: str
 
 
+class HealthSttInfo(BaseModel):
+    model: str
+    device: str
+    computeType: str
+    artifactReady: bool | None = None
+
+
+class HealthTtsInfo(BaseModel):
+    engine: str
+    sampleRate: int
+
+
 class HealthResponse(BaseModel):
     status: str
     sttLoaded: bool
     ttsLoaded: bool
+    stt: HealthSttInfo
+    tts: HealthTtsInfo
 
 
 class ModelLimits(BaseModel):

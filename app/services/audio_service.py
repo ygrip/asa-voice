@@ -41,9 +41,8 @@ def write_temp(audio_bytes: bytes, suffix: str) -> str:
         return f.name
 
 
-def enforce_duration(path: str) -> None:
+def enforce_duration(path: str, max_seconds: int | None = None) -> None:
+    limit = max_seconds if max_seconds is not None else settings.max_upload_seconds
     duration = probe_duration_seconds(path)
-    if duration is not None and duration > settings.max_audio_seconds:
-        raise AudioTooLong(
-            f"Audio is {duration:.1f}s; max is {settings.max_audio_seconds}s"
-        )
+    if duration is not None and duration > limit:
+        raise AudioTooLong(f"Audio is {duration:.1f}s; max is {limit}s")

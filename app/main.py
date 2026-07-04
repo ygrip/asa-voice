@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app import runtime
+from app.auth import _get_clients
 from app.config import settings
 from app.routers import health, stt, tts
 from app.services.stt_service import SttService
@@ -15,6 +16,11 @@ log = logging.getLogger("asa-voice")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    clients = _get_clients()
+    if clients:
+        log.info("Auth enabled — %d client(s): %s", len(clients), ", ".join(clients))
+    else:
+        log.warning("Auth DISABLED — ALLOWED_CLIENTS not set; all requests accepted")
     # Preload models once at startup. Load each independently and never crash the process on
     # failure — the container stays up serving /health, which returns 503 until BOTH are loaded.
     # This gives a clear readiness signal instead of a crash-loop.

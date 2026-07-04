@@ -1,4 +1,26 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS model-converter
+
+WORKDIR /work
+COPY requirements-convert.txt .
+RUN pip install --no-cache-dir -r requirements-convert.txt
+COPY scripts/convert_whisper_ct2.sh /usr/local/bin/convert_whisper_ct2.sh
+RUN chmod +x /usr/local/bin/convert_whisper_ct2.sh
+
+ARG STT_SOURCE_MODEL
+ARG STT_SOURCE_REVISION
+ARG STT_QUANTIZATION=int8
+ARG STT_OUTPUT_DIR=/models/whisper-ct2-int8
+RUN if [ -n "${STT_SOURCE_MODEL}" ] && [ -n "${STT_SOURCE_REVISION}" ]; then \
+        convert_whisper_ct2.sh \
+            "${STT_SOURCE_MODEL}" \
+            "${STT_OUTPUT_DIR}" \
+            "${STT_QUANTIZATION}" \
+            "${STT_SOURCE_REVISION}"; \
+    else \
+        mkdir -p /models; \
+    fi
+
+FROM python:3.11-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

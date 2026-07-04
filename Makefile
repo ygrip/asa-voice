@@ -4,6 +4,7 @@
 IMAGE        ?= ghcr.io/ygrip/asa-voice-sidecar:latest
 PORT         ?= 8090
 BASE         ?= http://localhost:$(PORT)
+API_KEY      ?= local-dev:change-me-local
 SAMPLE       ?= sample.wav
 TTS_TEXT     ?= Build created and assigned to the plan.
 TTS_VOICE    ?= asa_default
@@ -74,14 +75,17 @@ models: ## GET /models
 	curl -fsS $(BASE)/models | (python -m json.tool 2>/dev/null || cat)
 
 .PHONY: test-stt
-test-stt: ## POST /stt with SAMPLE=path.wav
+test-stt: ## POST /stt with SAMPLE=path.wav (API_KEY=client_id:secret)
 	@test -f "$(SAMPLE)" || { echo "Set SAMPLE=<audio file> (default sample.wav)"; exit 1; }
-	curl -fsS -X POST $(BASE)/stt -F "file=@$(SAMPLE)" | (python -m json.tool 2>/dev/null || cat)
+	curl -fsS -X POST $(BASE)/stt \
+		-H "X-API-Key: $(API_KEY)" \
+		-F "file=@$(SAMPLE)" | (python -m json.tool 2>/dev/null || cat)
 
 .PHONY: test-tts
-test-tts: ## POST /tts -> asa-output.wav (TTS_TEXT=, TTS_VOICE=)
+test-tts: ## POST /tts -> asa-output.wav (TTS_TEXT=, TTS_VOICE=, API_KEY=)
 	curl -fsS -X POST $(BASE)/tts \
 		-H "Content-Type: application/json" \
+		-H "X-API-Key: $(API_KEY)" \
 		-d '{"text":"$(TTS_TEXT)","voiceId":"$(TTS_VOICE)"}' \
 		--output asa-output.wav
 	@echo "wrote asa-output.wav"

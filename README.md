@@ -36,9 +36,76 @@ uvicorn app.main:app --port 8090
 | `GET` | `/health` | `{status, sttLoaded, ttsLoaded}` |
 | `GET` | `/models` | limits + STT info + TTS voice catalog |
 | `POST` | `/stt` | multipart `file` (wav/webm/mp3/m4a) → transcript JSON |
+| `POST` | `/stt/raw` | final PCM16 mono 16 kHz decode without temporary files |
 | `WS` | `/stt/stream` | WebSocket rolling-window streaming STT |
 | `POST` | `/tts` | JSON `{text, voiceId, format}` → `audio/wav` |
-| `POST` | `/tts/stream` | streaming PCM chunks via chunked HTTP |
+| `POST` | `/tts/stream` | `format=pcm|l16`; streaming PCM16 little-endian chunks via chunked HTTP |
+
+## WebSocket `/stt/stream`
+
+The client sends binary PCM16 mono 16 kHz little-endian frames. Send a configuration message once
+after connecting, before audio frames:
+
+```json
+{
+  "type": "config",
+  "language": "en",
+  "prompt": "Voice command for ASA on the Raksara build page.",
+  "hotwords": ["ASA", "Setara", "Raksara", "build 1.0.1"],
+  "requestId": "019voice-request"
+}
+```
+
+Control messages are `{"type":"flush"}` at the end of an utterance and `{"type":"reset"}` to
+discard it. Plain text `flush` remains supported for older clients. Server messages are:
+
+```json
+{"type":"partial","text":"open build raksara"}
+{"type":"final","text":"open build Raksara 1.0.1"}
+{"type":"error","detail":"STT model not loaded"}
+```
+
+Partials are display-only. Only a `final` transcript should trigger an ASA command.
+
+For HTTP finalization, `POST /stt/raw` requires `Content-Type: audio/l16`, `X-Sample-Rate: 16000`,
+`X-Channels: 1`, and `X-Sample-Format: s16le`. Optional bounded decode context is base64url-encoded
+JSON in `X-Stt-Context`.
+
+### Browser PCM capture example
+
+Use an `AudioWorklet` in production so capture does not depend on the main thread. The worklet must
+resample microphone audio to 16 kHz and post `Float32Array` frames. Convert and send each frame like
+this:
+
+```js
+function float32ToPcm16(samples) {
+  const pcm = new Int16Array(samples.length);
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, samples[index]));
+    pcm[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+  }
+  return pcm.buffer;
+}
+
+const socket = new WebSocket("ws://localhost:8090/stt/stream");
+socket.addEventListener("open", () => {
+  socket.send(JSON.stringify({ type: "config", hotwords: ["ASA", "Setara"] }));
+});
+worklet.port.onmessage = ({ data }) => {
+  if (socket.readyState === WebSocket.OPEN) socket.send(float32ToPcm16(data));
+};
+vad.onSpeechEnd = () => socket.send(JSON.stringify({ type: "flush" }));
+socket.addEventListener("message", ({ data }) => {
+  const event = JSON.parse(data);
+  if (event.type === "partial") renderGhostTranscript(event.text);
+  if (event.type === "final") submitFinalTranscript(event.text);
+});
+```
+
+`POST /tts` accepts only `format=wav` and returns `audio/wav`. `POST /tts/stream` accepts only
+`format=pcm` or `format=l16` and returns `audio/l16` with `X-Sample-Rate`, `X-Channels`, and
+`X-Sample-Format: s16le`. Raw PCM is not a WAV file and must be scheduled through Web Audio rather
+than passed to `decodeAudioData()`.
 
 ### Quick test
 
@@ -92,6 +159,91 @@ docker pull ghcr.io/ygrip/asa-voice:latest
 ```
 
 Multi-arch: `linux/amd64` and `linux/arm64`.
+
+## Converting a custom Whisper model
+
+Convert once per checkpoint version. Do not install conversion dependencies or download a model at
+container startup. Resolve and record the immutable Hugging Face commit first:
+
+```bash
+git ls-remote https://huggingface.co/your-org/your-whisper refs/heads/main
+pip install -r requirements-convert.txt
+scripts/convert_whisper_ct2.sh \
+  your-org/your-whisper \
+  /models/your-whisper-ct2-int8 \
+  int8 \
+  FULL_COMMIT_SHA
+STT_MODEL=/models/your-whisper-ct2-int8 uvicorn app.main:app --port 8090
+```
+
+The script rejects mutable `main`, converts into a temporary directory, records source metadata,
+and moves the artifact into place only after `.asa_model_ready` exists. Mount the resulting model
+read-only in production. To produce only a model artifact through Docker:
+
+```bash
+docker build --target model-converter \
+  --build-arg STT_SOURCE_MODEL=your-org/your-whisper \
+  --build-arg STT_SOURCE_REVISION=FULL_COMMIT_SHA \
+  --build-arg STT_QUANTIZATION=int8 \
+  --output type=local,dest=./converted-model .
+```
+
+For a model fine-tuned with Unsloth, first merge/export the adapter as a complete Hugging Face
+Whisper checkpoint containing model weights, config, tokenizer, generation config, and feature
+extractor. Upload that checkpoint at an immutable revision, run the same conversion command, then
+benchmark the CT2 artifact before changing `STT_MODEL`.
+
+### CrisperWhisper evaluation lane
+
+`unsloth/CrisperWhisper` is not a drop-in production default for Setara. It is based on Whisper
+Large v3, trained for English and German verbatim transcription, uses a retokenized vocabulary, and
+is licensed CC BY-NC 4.0. That makes it both too large for the current combined 4 CPU / 3 GB
+sidecar target and unsuitable for commercial deployment. Its special timestamp behavior also relies
+on a custom Transformers fork and does not automatically carry over to faster-whisper.
+
+For non-commercial evaluation only, the model revision inspected for this implementation is:
+
+```text
+unsloth/CrisperWhisper@4507962bae1df56f2c31bafb0df90ec9d6e0b2f4
+```
+
+Attempt conversion with the pinned command below and treat converter or tokenizer incompatibility as
+a failed lane, not a reason to patch runtime dynamically:
+
+```bash
+scripts/convert_whisper_ct2.sh \
+  unsloth/CrisperWhisper \
+  /models/crisper-whisper-ct2-int8 \
+  int8 \
+  4507962bae1df56f2c31bafb0df90ec9d6e0b2f4
+```
+
+For Indonesian-English commands under the current resource cap, evaluate multilingual Whisper
+`small` or a domain fine-tune of `small` first. CrisperWhisper should only proceed if licensing,
+conversion compatibility, peak RSS, final latency, and entity accuracy all pass independently.
+
+`cobrayyxx/whisper-small-indo-eng` is an Apache-2.0 Whisper Small checkpoint and its model card
+explicitly documents CTranslate2 conversion. The pinned revision inspected here is:
+
+```text
+cobrayyxx/whisper-small-indo-eng@0d3a356eb29177e4d956beb163c14762d8ac0350
+```
+
+It is a valid benchmark candidate, but it was trained for Indonesian-to-English speech translation,
+not mixed-language verbatim transcription. Its published metrics are BLEU/CHRF translation scores;
+it publishes no WER, CER, mixed-command, or entity-preservation result. Converting it is straightforward:
+
+```bash
+scripts/convert_whisper_ct2.sh \
+  cobrayyxx/whisper-small-indo-eng \
+  /models/whisper-small-indo-eng-ct2-int8 \
+  int8 \
+  0d3a356eb29177e4d956beb163c14762d8ac0350
+```
+
+Do not promote it from the benchmark lane unless it preserves Indonesian terms and Setara entity
+names while beating multilingual Whisper Small on the command corpus. A translation model can score
+well while silently translating or rewriting exactly the words that tool routing needs.
 
 ---
 

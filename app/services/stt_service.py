@@ -1,9 +1,11 @@
 import os
+from collections import deque
 
 import numpy as np
 from faster_whisper import WhisperModel
 
 from app.config import settings
+from app.services.stt_context import SttDecodeContext, build_hotwords, build_prompt, resolve_language
 
 STREAM_SAMPLE_RATE = 16000  # faster-whisper's native rate; the WS client sends PCM16 mono @ 16 kHz
 
@@ -21,24 +23,30 @@ class SttService:
             num_workers=settings.stt_num_workers,
         )
 
-    def transcribe(self, path: str, language: str | None = None, vad: bool | None = None) -> dict:
+    def transcribe(
+        self,
+        path: str,
+        language: str | None = None,
+        vad: bool | None = None,
+        context: SttDecodeContext | None = None,
+    ) -> dict:
         try:
             segments, info = self.model.transcribe(
                 path,
-                language=language or settings.stt_language,
-                vad_filter=settings.stt_vad_filter if vad is None else vad,
+                language=resolve_language(context, language),
+                vad_filter=settings.stt_final_vad_filter if vad is None else vad,
                 vad_parameters={"min_silence_duration_ms": settings.stt_vad_min_silence_ms},
-                beam_size=settings.stt_beam_size,
-                best_of=settings.stt_best_of,
+                beam_size=settings.stt_final_beam_size,
+                best_of=settings.stt_final_best_of,
                 temperature=settings.stt_temperatures,
                 repetition_penalty=settings.stt_repetition_penalty,
                 no_repeat_ngram_size=settings.stt_no_repeat_ngram_size,
                 compression_ratio_threshold=settings.stt_compression_ratio_threshold,
                 log_prob_threshold=settings.stt_log_prob_threshold,
-                condition_on_previous_text=settings.stt_condition_on_previous,
+                condition_on_previous_text=settings.stt_final_condition_on_previous,
                 no_speech_threshold=settings.stt_no_speech_threshold,
-                initial_prompt=settings.stt_prompt or None,
-                hotwords=settings.stt_hotwords or None,
+                initial_prompt=build_prompt(context),
+                hotwords=build_hotwords(context),
             )
 
             collected = []
@@ -63,15 +71,15 @@ class SttService:
             except OSError:
                 pass
 
-    def decode_words(self, audio: np.ndarray) -> list[dict]:
+    def decode_words(self, audio: np.ndarray, context: SttDecodeContext | None = None) -> list[dict]:
         """Transcribe a float32 mono @16kHz array, returning word-level timing. Used by the rolling
         streaming session — no file IO, no VAD trimming (the session manages the buffer)."""
         segments, _ = self.model.transcribe(
             audio,
-            language=settings.stt_language,
-            vad_filter=False,
-            beam_size=settings.stt_beam_size,
-            best_of=settings.stt_best_of,
+            language=resolve_language(context),
+            vad_filter=settings.stt_partial_vad_filter,
+            beam_size=settings.stt_partial_beam_size,
+            best_of=settings.stt_partial_best_of,
             temperature=settings.stt_temperatures,
             repetition_penalty=settings.stt_repetition_penalty,
             no_repeat_ngram_size=settings.stt_no_repeat_ngram_size,
@@ -79,9 +87,9 @@ class SttService:
             log_prob_threshold=settings.stt_log_prob_threshold,
             condition_on_previous_text=False,
             no_speech_threshold=settings.stt_no_speech_threshold,
-            initial_prompt=settings.stt_prompt or None,
-            hotwords=settings.stt_hotwords or None,
-            word_timestamps=True,
+            initial_prompt=build_prompt(context),
+            hotwords=build_hotwords(context),
+            word_timestamps=settings.stt_partial_word_timestamps,
         )
         words: list[dict] = []
         for seg in segments:
@@ -90,6 +98,44 @@ class SttService:
                 if t:
                     words.append({"w": t, "start": w.start, "end": w.end})
         return words
+
+    def transcribe_array_final(
+        self, audio: np.ndarray, context: SttDecodeContext | None = None
+    ) -> dict:
+        """Decode a complete utterance with the accuracy profile used for command execution."""
+        segments, info = self.model.transcribe(
+            audio,
+            language=resolve_language(context),
+            vad_filter=settings.stt_final_vad_filter,
+            vad_parameters={"min_silence_duration_ms": settings.stt_vad_min_silence_ms},
+            beam_size=settings.stt_final_beam_size,
+            best_of=settings.stt_final_best_of,
+            temperature=settings.stt_temperatures,
+            repetition_penalty=settings.stt_repetition_penalty,
+            no_repeat_ngram_size=settings.stt_no_repeat_ngram_size,
+            compression_ratio_threshold=settings.stt_compression_ratio_threshold,
+            log_prob_threshold=settings.stt_log_prob_threshold,
+            condition_on_previous_text=settings.stt_final_condition_on_previous,
+            no_speech_threshold=settings.stt_no_speech_threshold,
+            initial_prompt=build_prompt(context),
+            hotwords=build_hotwords(context),
+            word_timestamps=settings.stt_final_word_timestamps,
+        )
+        collected = []
+        full_text = []
+        for segment in segments:
+            text = segment.text.strip()
+            if text:
+                full_text.append(text)
+                collected.append({"start": segment.start, "end": segment.end, "text": text})
+        return {
+            "text": collapse_repeats(" ".join(full_text).strip()),
+            "segments": collected,
+            "language": info.language,
+            "durationSeconds": info.duration,
+            "engine": "faster-whisper",
+            "model": settings.stt_model,
+        }
 
 
 class StreamingSttSession:
@@ -102,7 +148,11 @@ class StreamingSttSession:
 
     def __init__(self, service: "SttService"):
         self._svc = service
-        self._buf = np.zeros(0, dtype=np.float32)
+        self._context: SttDecodeContext | None = None
+        self._chunks: deque[np.ndarray] = deque()
+        self._total_samples = 0
+        self._utterance_chunks: deque[np.ndarray] = deque()
+        self._utterance_samples = 0
         self._buf_offset_s = 0.0  # audio (seconds) already trimmed off the front of _buf
         self._committed: list[str] = []  # committed word texts (the final transcript so far)
         self._prev: list[dict] = []      # previous decode's words (absolute times)
@@ -112,43 +162,65 @@ class StreamingSttSession:
     def committed_text(self) -> str:
         return " ".join(self._committed).strip()
 
+    def configure(self, context: SttDecodeContext) -> None:
+        self._context = context
+
+    def reset(self) -> None:
+        self._chunks.clear()
+        self._total_samples = 0
+        self._utterance_chunks.clear()
+        self._utterance_samples = 0
+        self._buf_offset_s = 0.0
+        self._committed = []
+        self._prev = []
+        self._agreed_len = 0
+        self._samples_since_decode = 0
+
     def add_pcm(self, pcm_bytes: bytes) -> None:
         if not pcm_bytes:
             return
         samples = np.frombuffer(pcm_bytes, dtype="<i2").astype(np.float32) / 32768.0
-        self._buf = np.concatenate((self._buf, samples))
+        self._chunks.append(samples)
+        self._total_samples += samples.size
+        self._utterance_chunks.append(samples)
+        self._utterance_samples += samples.size
         self._samples_since_decode += samples.size
         # Hard cap the buffer to MAX_AUDIO_SECONDS so a long talker can't grow it without bound.
         max_samples = settings.max_audio_seconds * STREAM_SAMPLE_RATE
-        if self._buf.size > max_samples:
-            drop = self._buf.size - max_samples
-            self._buf = self._buf[drop:]
+        if self._total_samples > max_samples:
+            drop = self._total_samples - max_samples
+            self._drop_samples(self._chunks, drop, rolling=True)
             self._buf_offset_s += drop / STREAM_SAMPLE_RATE
+        if self._utterance_samples > max_samples:
+            drop = self._utterance_samples - max_samples
+            self._drop_samples(self._utterance_chunks, drop, rolling=False)
 
     def should_decode(self) -> bool:
         interval = settings.stt_stream_interval_ms / 1000.0 * STREAM_SAMPLE_RATE
-        if self._samples_since_decode < interval or self._buf.size == 0:
+        if self._samples_since_decode < interval or self._total_samples == 0:
             return False
         if settings.stt_stream_energy_threshold > 0:
-            rms = float(np.sqrt(np.mean(self._buf ** 2)))
+            audio = self._rolling_audio()
+            rms = float(np.sqrt(np.mean(audio ** 2)))
             if rms < settings.stt_stream_energy_threshold:
                 return False
         return True
 
     def has_buffered_audio(self) -> bool:
-        return self._buf.size > 0
+        return self._total_samples > 0
 
     def is_silent(self) -> bool:
         """True if the current buffer RMS is below the energy threshold."""
-        if settings.stt_stream_energy_threshold <= 0 or self._buf.size == 0:
+        if settings.stt_stream_energy_threshold <= 0 or self._total_samples == 0:
             return False
-        rms = float(np.sqrt(np.mean(self._buf ** 2)))
+        audio = self._rolling_audio()
+        rms = float(np.sqrt(np.mean(audio ** 2)))
         return rms < settings.stt_stream_energy_threshold
 
     def decode(self) -> dict:
         """Re-decode the buffer and apply LocalAgreement-2. Returns {committed, partial}."""
         self._samples_since_decode = 0
-        words = self._svc.decode_words(self._buf)
+        words = self._svc.decode_words(self._rolling_audio(), self._context)
         for w in words:  # shift to absolute time so trimming survives across decodes
             w["start"] += self._buf_offset_s
             w["end"] += self._buf_offset_s
@@ -161,17 +233,12 @@ class StreamingSttSession:
 
     def flush(self) -> dict:
         """End of utterance: commit the current tentative tail and reset for the next utterance."""
-        tail = " ".join(w["w"] for w in self._prev[self._agreed_len:]).strip()
-        text = " ".join(self._committed).strip()
-        if tail:
-            text = (text + " " + tail).strip()
-        text = collapse_repeats(text)
-        self._buf = np.zeros(0, dtype=np.float32)
-        self._buf_offset_s = 0.0
-        self._committed = []
-        self._prev = []
-        self._agreed_len = 0
-        self._samples_since_decode = 0
+        audio = self._utterance_audio()
+        if audio.size:
+            text = self._svc.transcribe_array_final(audio, self._context)["text"]
+        else:
+            text = ""
+        self.reset()
         return {"final": text}
 
     _agreed_len = 0  # how many words of the current decode are confirmed committed
@@ -192,11 +259,39 @@ class StreamingSttSession:
             return
         cut_s = self._prev[self._agreed_len - 1]["end"] - self._buf_offset_s
         cut_samples = int(max(0.0, cut_s) * STREAM_SAMPLE_RATE)
-        if cut_samples > 0 and cut_samples < self._buf.size:
-            self._buf = self._buf[cut_samples:]
+        if cut_samples > 0 and cut_samples < self._total_samples:
+            self._drop_samples(self._chunks, cut_samples, rolling=True)
             self._buf_offset_s += cut_samples / STREAM_SAMPLE_RATE
             self._prev = self._prev[self._agreed_len:]
             self._agreed_len = 0
+
+    def _rolling_audio(self) -> np.ndarray:
+        if not self._chunks:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(tuple(self._chunks))
+
+    def _utterance_audio(self) -> np.ndarray:
+        if not self._utterance_chunks:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(tuple(self._utterance_chunks))
+
+    def _drop_samples(
+        self, chunks: deque[np.ndarray], count: int, *, rolling: bool
+    ) -> None:
+        remaining = count
+        while remaining > 0 and chunks:
+            chunk = chunks[0]
+            if chunk.size <= remaining:
+                chunks.popleft()
+                removed = chunk.size
+            else:
+                chunks[0] = chunk[remaining:]
+                removed = remaining
+            remaining -= removed
+            if rolling:
+                self._total_samples -= removed
+            else:
+                self._utterance_samples -= removed
 
 
 def _norm(word: str) -> str:
