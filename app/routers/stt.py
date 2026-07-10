@@ -2,7 +2,9 @@ import base64
 import binascii
 import json
 import logging
+import os
 import time
+import uuid
 
 import numpy as np
 from fastapi import (
@@ -23,13 +25,29 @@ from fastapi.concurrency import run_in_threadpool
 from app import runtime
 from app.auth import require_api_key, validate_key
 from app.config import settings
-from app.schemas import SttResponse
+from app.providers.base import SttOptions
+from app.schemas import SttResponse, stt_response
 from app.services import audio_service
 from app.services.stt_service import StreamingSttSession, collapse_repeats
 from app.services.stt_context import SttDecodeContext
 
 router = APIRouter()
 log = logging.getLogger("asa.stt")
+
+
+def _options_from_context(
+    context: SttDecodeContext | None,
+    client_id: str,
+    request_id: str | None,
+    language: str | None = None,
+) -> SttOptions:
+    return SttOptions(
+        language=language or (context.language if context else None),
+        prompt=context.prompt if context else None,
+        hotwords=context.hotwords if context else None,
+        request_id=request_id or (context.request_id if context else None) or str(uuid.uuid4()),
+        client_id=client_id,
+    )
 
 
 @router.post("/stt/raw", response_model=SttResponse)
@@ -39,9 +57,10 @@ async def stt_raw(
     x_channels: int = Header(default=1),
     x_sample_format: str = Header(default="s16le"),
     x_stt_context: str | None = Header(default=None),
+    x_request_id: str | None = Header(default=None),
     _client_id: str = Depends(require_api_key),
 ) -> SttResponse:
-    if runtime.stt_service is None:
+    if runtime.stt_router is None:
         raise HTTPException(status_code=503, detail="STT model not loaded")
     if request.headers.get("content-type", "").split(";", 1)[0].lower() != "audio/l16":
         raise HTTPException(status_code=415, detail="Expected Content-Type audio/l16")
@@ -58,16 +77,15 @@ async def stt_raw(
     if len(body) % 2 != 0:
         raise HTTPException(status_code=400, detail="PCM16 body must contain complete samples")
     sample_count = len(body) // 2
-    if sample_count > settings.max_upload_seconds * 16000:
+    if sample_count > settings.max_audio_seconds * 16000:
         raise HTTPException(status_code=413, detail="Audio exceeds maximum duration")
 
     context = _decode_header_context(x_stt_context)
+    options = _options_from_context(context, _client_id, x_request_id)
     audio = np.frombuffer(body, dtype="<i2").astype(np.float32) / 32768.0
     async with runtime.stt_semaphore:
-        result = await run_in_threadpool(
-            runtime.stt_service.transcribe_array_final, audio, context
-        )
-    return SttResponse(**result)
+        result = await runtime.stt_router.transcribe_array(audio, options)
+    return stt_response(result, options.request_id)
 
 
 def _decode_header_context(encoded: str | None) -> SttDecodeContext | None:
@@ -87,11 +105,11 @@ def _decode_header_context(encoded: str | None) -> SttDecodeContext | None:
 async def stt(
     file: UploadFile = File(...),
     language: str | None = Form(default=None),
-    vad: bool | None = Form(default=None),
     context: str | None = Form(default=None),
+    x_request_id: str | None = Header(default=None),
     _client_id: str = Depends(require_api_key),
 ) -> SttResponse:
-    if runtime.stt_service is None:
+    if runtime.stt_router is None:
         raise HTTPException(status_code=503, detail="STT model not loaded")
 
     if runtime.stt_semaphore.locked():
@@ -111,7 +129,6 @@ async def stt(
     try:
         audio_service.enforce_duration(path)
     except audio_service.AudioTooLong as exc:
-        import os
         try:
             os.remove(path)
         except OSError:
@@ -123,11 +140,10 @@ async def stt(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid STT context") from exc
 
+    options = _options_from_context(decode_context, _client_id, x_request_id, language)
     async with runtime.stt_semaphore:
-        result = await run_in_threadpool(
-            runtime.stt_service.transcribe, path, language, vad, decode_context
-        )
-    return SttResponse(**result)
+        result = await runtime.stt_router.transcribe(path, options)
+    return stt_response(result, options.request_id)
 
 
 @router.websocket("/stt/stream")

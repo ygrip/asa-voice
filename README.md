@@ -33,8 +33,8 @@ uvicorn app.main:app --port 8090
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/health` | `{status, sttLoaded, ttsLoaded}` |
-| `GET` | `/models` | limits + STT info + TTS voice catalog |
+| `GET` | `/health` | `{status, mode, sttLoaded, ttsLoaded, stt:{provider,...}, tts:{provider,...}}` |
+| `GET` | `/models` | mode + limits + STT/TTS active+fallback+available providers |
 | `POST` | `/stt` | multipart `file` (wav/webm/mp3/m4a) → transcript JSON |
 | `POST` | `/stt/raw` | final PCM16 mono 16 kHz decode without temporary files |
 | `WS` | `/stt/stream` | WebSocket rolling-window streaming STT |
@@ -136,6 +136,13 @@ curl -X POST http://localhost:8090/tts \
   to 16-bit PCM wav). Isolated behind `app/services/tts_service.py` — the `/tts` contract is engine-agnostic,
   so swapping engines (Piper fallback) touches only that file.
   Voice catalog maps our IDs → Kyutai voices: `asa_default` → anna, `asa_bright` → eve, `asa_calm` → george.
+
+### Provider mode (`ASA_VOICE_MODE`)
+
+STT/TTS engines sit behind provider adapters (`app/providers/`) selected through `STT_PROVIDER`/`TTS_PROVIDER` +
+`ASA_VOICE_MODE` (`local` | `hosted` | `hybrid`). Only `faster_whisper`/`pocket_tts` are implemented today — an
+unrecognized provider name fails the process at startup instead of silently no-op'ing. See
+`asa-local-openai-hosted-mode-plan.md` (repo root) and this file's `KNOWLEDGE.md` for the adapter/router pattern.
 
 ### First start downloads models
 
@@ -253,6 +260,12 @@ All env keys are in `.env.example` and map 1:1 to `app/config.py` fields.
 
 | Variable | Default | Description |
 |---|---|---|
+| `ASA_VOICE_MODE` | `local` | `local` \| `hosted` \| `hybrid` (only `local` is fully implemented; others require Phase 2 OpenAI adapters) |
+| `STT_PROVIDER` | `faster_whisper` | Active STT provider; unrecognized values fail startup |
+| `STT_FALLBACK_PROVIDER` | `none` | Secondary STT provider used when the primary raises |
+| `STT_ALLOW_PROVIDER_OVERRIDE` | `false` | Whether a request may override the provider per-call (reserved for Phase 2) |
+| `TTS_PROVIDER` | `pocket_tts` | Active TTS provider; unrecognized values fail startup |
+| `TTS_FALLBACK_PROVIDER` | `none` | Secondary TTS provider used when the primary raises |
 | `STT_MODEL` | `distil-small.en` | faster-whisper model. `base.en` (lightest) → `distil-small.en` → `small.en` (most accurate) |
 | `STT_DEVICE` | `cpu` | Inference device |
 | `STT_COMPUTE_TYPE` | `int8` | CTranslate2 quantization |

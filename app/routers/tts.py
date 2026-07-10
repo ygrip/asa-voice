@@ -1,3 +1,5 @@
+import os
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response, StreamingResponse
@@ -5,6 +7,7 @@ from fastapi.responses import Response, StreamingResponse
 from app import runtime
 from app.auth import require_api_key
 from app.config import settings
+from app.providers.base import TtsOptions
 from app.schemas import TtsRequest
 from app.services.tts_service import TtsSynthesisError
 
@@ -18,7 +21,7 @@ async def tts(
     req: TtsRequest,
     _client_id: str = Depends(require_api_key),
 ) -> Response:
-    if runtime.tts_service is None:
+    if runtime.tts_router is None:
         raise HTTPException(status_code=503, detail="TTS model not loaded")
 
     text = req.text.strip()
@@ -30,13 +33,23 @@ async def tts(
     if runtime.tts_semaphore.locked():
         raise HTTPException(status_code=429, detail="TTS busy — retry shortly")
 
+    options = TtsOptions(voice_id=req.voiceId, format=req.format, client_id=_client_id)
     async with runtime.tts_semaphore:
         try:
-            audio = await run_in_threadpool(runtime.tts_service.synthesize, text, req.voiceId)
+            result = await runtime.tts_router.synthesize(text, options)
         except TtsSynthesisError as exc:
             raise HTTPException(status_code=502, detail=f"TTS synthesis failed: {exc}") from exc
 
-    return Response(content=audio, media_type="audio/wav")
+    try:
+        with open(result.audio_path, "rb") as f:
+            audio = f.read()
+    finally:
+        try:
+            os.remove(result.audio_path)
+        except OSError:
+            pass
+
+    return Response(content=audio, media_type=result.content_type)
 
 
 @router.post("/tts/stream")

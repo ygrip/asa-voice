@@ -6,6 +6,18 @@ class Settings(BaseSettings):
 
     app_name: str = "ASA Voice Sidecar"
 
+    # Provider mode (plan §3 / §7.1): local (faster_whisper + pocket_tts only) | hosted (OpenAI
+    # primary) | hybrid (OpenAI primary + faster_whisper fallback). Only "faster_whisper"/"pocket_tts"
+    # adapters exist until Phase 2, so the default MUST boot clean with zero OPENAI_API_KEY set —
+    # see runtime.py, which fails fast at startup if an unimplemented provider is configured instead
+    # of silently no-op'ing.
+    asa_voice_mode: str = "local"
+    stt_provider: str = "faster_whisper"
+    stt_fallback_provider: str = "none"
+    stt_allow_provider_override: bool = False
+    tts_provider: str = "pocket_tts"
+    tts_fallback_provider: str = "none"
+
     # STT (faster-whisper). distil-small.en is the sweet spot for a 3 GB / 4 CPU box: distilled so it
     # runs faster than small.en, yet noticeably more accurate than base.en. Alternatives via STT_MODEL:
     # base.en (lightest), small.en (most accurate, slower). Avoid distil-large-v3 — too heavy for ASA.

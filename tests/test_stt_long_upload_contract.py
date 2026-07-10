@@ -49,6 +49,7 @@ def test_upload_route_returns_full_multisegment_text() -> None:
 
     from app import runtime
     from app.auth import require_api_key
+    from app.providers.base import SttResult, SttSegment
     from app.routers import stt
     from app.services import audio_service
 
@@ -58,16 +59,26 @@ def test_upload_route_returns_full_multisegment_text() -> None:
     ]
     full_text = " ".join(s["text"] for s in segments)
 
-    class FakeStt:
-        def transcribe(self, path, language=None, vad=None, context=None):  # noqa: D401
-            return {
-                "text": full_text, "segments": segments, "language": "en",
-                "durationSeconds": 45.0, "engine": "faster-whisper", "model": "test",
-            }
+    class FakeSttRouter:
+        """Stands in for the real SttProviderRouter — the route only depends on the router's
+        async transcribe(path, options) -> SttResult contract, not on any specific adapter."""
 
-    orig_service = runtime.stt_service
+        async def transcribe(self, path, options):  # noqa: D401
+            return SttResult(
+                provider="faster_whisper",
+                model="test",
+                text=full_text,
+                language="en",
+                duration_ms=45_000,
+                latency_ms=1,
+                segments=[
+                    SttSegment(start=s["start"], end=s["end"], text=s["text"]) for s in segments
+                ],
+            )
+
+    orig_router = runtime.stt_router
     orig_probe = audio_service.probe_duration_seconds
-    runtime.stt_service = FakeStt()
+    runtime.stt_router = FakeSttRouter()
     audio_service.probe_duration_seconds = lambda path: 45.0  # under the cap; skip ffprobe
     app = FastAPI()
     app.include_router(stt.router)
@@ -78,5 +89,5 @@ def test_upload_route_returns_full_multisegment_text() -> None:
         assert resp.status_code == 200, resp.text
         assert resp.json()["text"] == full_text  # every segment survived, in order
     finally:
-        runtime.stt_service = orig_service
+        runtime.stt_router = orig_router
         audio_service.probe_duration_seconds = orig_probe

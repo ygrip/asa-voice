@@ -21,3 +21,33 @@
   only atomically completed artifacts carrying source metadata and `.asa_model_ready`; runtime never converts by
   default. Model architecture, language coverage, license, tokenizer compatibility, RSS, and entity accuracy are
   independent deployment gates.
+
+## Provider Adapter Pattern (setara-s94o Phase 1)
+
+- STT/TTS providers are wrapped behind `app/providers/base.py`'s `SttAdapter`/`TtsAdapter` protocols and their shared
+  `SttOptions`/`SttResult`/`SttSegment`/`TtsOptions`/`TtsResult` dataclasses. Every route goes through
+  `runtime.stt_router`/`runtime.tts_router` (`app/providers/router.py`'s `SttProviderRouter`/`TtsProviderRouter`) —
+  never call `runtime.stt_service`/`runtime.tts_service` (the raw engines) directly from a router except for the
+  streaming WS session and `/tts/stream`, which are lower-level paths orthogonal to provider selection (only
+  faster-whisper does rolling-window streaming; hosted realtime STT is a separate code path, see setara-s94o.18).
+- `SttAdapter.transcribe(audio_path, options)` is the file-based entry point (used by `/stt`). The router also
+  exposes `transcribe_array(audio, options)`, a file-free fast path used by `/stt/raw` and the streaming session's
+  flush — this only local providers implement; do not force hosted providers (which require an uploaded file) to
+  support it. Preserving this array-based path matters: `/stt/raw` is deliberately file-free (no temp-file round
+  trip) for the core-to-sidecar final-decode leg.
+- `TtsAdapter.synthesize()` returns a `TtsResult.audio_path`, not raw bytes — adapters write synthesized audio to a
+  temp file via the existing `audio_service.write_temp()` helper (reused, not duplicated) so every provider
+  (including the future OpenAI TTS adapter) hands back the same file-based shape; routers read the file and clean
+  it up. This is a deliberate small perf trade (one extra disk round-trip per `/tts` call) for provider symmetry.
+- New STT/TTS providers must be registered in `runtime.SUPPORTED_STT_PROVIDERS`/`SUPPORTED_TTS_PROVIDERS` (and the
+  `*_FALLBACK_PROVIDERS` sets) and in `runtime.build_stt_adapter`/`build_tts_adapter`. Configuring an unregistered
+  provider name must fail fast at boot (`runtime.validate_provider_config`, called from `main.py`'s lifespan before
+  model loading) — never silently no-op into a broken mode. This is distinct from a model *load* failure, which
+  still degrades gracefully (`/health` reports 503, process stays up).
+- `app/schemas.py`'s wire-facing models were reconciled, not replaced: `SttResponse` was renamed to the
+  provider-agnostic field set (`provider`/`durationMs`/`latencyMs`/`fallbackUsed`/...) since it had exactly one real
+  external consumer (`setara-core`'s `AsaVoiceSessionService.resolve()`, updated alongside); `HealthResponse`/
+  `ModelsResponse` were extended additively (new `mode`/`provider`/`ready`/`activeProvider` fields sit next to the
+  existing `device`/`computeType`/`engine` fields) because those have no real external consumer yet and existing
+  tests assert the old field names verbatim.
+
