@@ -2,6 +2,7 @@
 # Usage: make <target>   (run `make help` for the list)
 
 IMAGE        ?= ghcr.io/ygrip/asa-voice-sidecar:latest
+PYTHON       ?= python3
 PORT         ?= 8090
 BASE         ?= http://localhost:$(PORT)
 API_KEY      ?= local-dev:change-me-local
@@ -56,13 +57,26 @@ install: ## Install deps into the active venv (CPU torch)
 	pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.5.0" || pip install "torch>=2.5.0"
 	pip install -r requirements.txt
 
+.PHONY: install-dev
+install-dev: ## Install runtime and test dependencies into the active venv
+	$(MAKE) install
+	pip install -r requirements-dev.txt
+
+.PHONY: config-check
+config-check: ## Verify Settings and env documentation without model dependencies
+	$(PYTHON) scripts/check_config_contract.py
+
+.PHONY: test
+test: config-check ## Run the contract test suite
+	$(PYTHON) -m pytest tests/ -v --tb=short
+
 .PHONY: run
 run: ## Run the API locally with reload
 	uvicorn app.main:app --host 0.0.0.0 --port $(PORT) --reload
 
 .PHONY: compile
 compile: ## Syntax-check all Python sources
-	python -m py_compile app/*.py app/services/*.py app/routers/*.py
+	$(PYTHON) -m py_compile app/*.py app/services/*.py app/routers/*.py
 	@echo "py_compile OK"
 
 ## ── Smoke tests (need the service running) ───────────────────────────────────

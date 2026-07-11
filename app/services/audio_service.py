@@ -20,7 +20,9 @@ def check_upload_size(num_bytes: int) -> None:
 
 
 def probe_duration_seconds(path: str) -> float | None:
-    """Probe audio duration via ffprobe (ffmpeg ships in the image). Returns None if unknown."""
+    """Probe audio duration via ffprobe (ffmpeg ships in the image). Returns None if unknown —
+    including when ffprobe itself isn't on PATH (e.g. running outside the container), so callers
+    degrade gracefully instead of raising."""
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -29,7 +31,7 @@ def probe_duration_seconds(path: str) -> float | None:
         )
         value = out.stdout.strip()
         return float(value) if value else None
-    except (subprocess.SubprocessError, ValueError):
+    except (subprocess.SubprocessError, OSError, ValueError):
         return None
 
 

@@ -61,9 +61,10 @@ def test_upload_route_returns_full_multisegment_text() -> None:
 
     class FakeSttRouter:
         """Stands in for the real SttProviderRouter — the route only depends on the router's
-        async transcribe(path, options) -> SttResult contract, not on any specific adapter."""
+        async transcribe(path, options, provider_override=None) -> SttResult contract, not on
+        any specific adapter."""
 
-        async def transcribe(self, path, options):  # noqa: D401
+        async def transcribe(self, path, options, provider_override=None):  # noqa: D401
             return SttResult(
                 provider="faster_whisper",
                 model="test",

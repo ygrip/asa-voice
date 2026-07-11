@@ -24,8 +24,8 @@ def test_validate_provider_config_passes_for_default_settings() -> None:
 @pytest.mark.parametrize(
     "env_var,value",
     [
-        ("stt_provider", "openai"),
-        ("stt_fallback_provider", "openai"),
+        ("stt_provider", "azure_speech"),
+        ("stt_fallback_provider", "azure_speech"),
         ("tts_provider", "openai"),
         ("tts_fallback_provider", "openai"),
     ],
@@ -46,6 +46,12 @@ def test_build_stt_adapter_returns_none_for_none_provider() -> None:
     assert runtime.build_stt_adapter("none", service=object()) is None
 
 
+def test_build_stt_adapter_builds_openai_adapter_without_a_local_service() -> None:
+    # openai is a hosted provider - it must not require the local faster-whisper SttService.
+    adapter = runtime.build_stt_adapter("openai", service=None)
+    assert adapter.provider_name == "openai"
+
+
 def test_build_stt_adapter_raises_for_unimplemented_provider() -> None:
     with pytest.raises(runtime.UnsupportedProviderError):
-        runtime.build_stt_adapter("openai", service=object())
+        runtime.build_stt_adapter("azure_speech", service=object())

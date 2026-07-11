@@ -8,6 +8,10 @@ Plan reference: asa-local-openai-hosted-mode-plan.md §5 (Provider Abstraction).
 from dataclasses import dataclass, field
 from typing import List, Optional, Protocol
 
+# Sentinel audio_path passed to SttPolicy.validate_audio() by the file-free /stt/raw + streaming
+# array-based path, where there is no real file on disk to inspect.
+IN_MEMORY_AUDIO_MARKER = "<in-memory>"
+
 
 @dataclass
 class SttOptions:

@@ -9,11 +9,13 @@ import asyncio
 import pytest
 
 from app.providers.base import SttOptions, SttResult, TtsOptions, TtsResult
+from app.providers.errors import SttFallbackEligibleError
 from app.providers.router import SttProviderRouter, TtsProviderRouter
 
 
 class _FakeSttAdapter:
-    def __init__(self, result: SttResult | None = None, error: Exception | None = None):
+    def __init__(self, provider_name="faster_whisper", result: SttResult | None = None, error: Exception | None = None):
+        self.provider_name = provider_name
         self._result = result
         self._error = error
         self.calls = 0
@@ -23,6 +25,9 @@ class _FakeSttAdapter:
         if self._error:
             raise self._error
         return self._result
+
+    async def transcribe_array(self, audio, options):
+        return await self.transcribe("<in-memory>", options)
 
 
 def _stt_result(provider: str = "faster_whisper") -> SttResult:
@@ -51,15 +56,46 @@ def test_stt_router_raises_primary_error_when_fallback_is_none() -> None:
         asyncio.run(router.transcribe("audio.wav", SttOptions()))
 
 
-def test_stt_router_falls_back_and_marks_fallback_used() -> None:
-    primary = _FakeSttAdapter(error=RuntimeError("primary failed"))
-    fallback = _FakeSttAdapter(result=_stt_result(provider="faster_whisper_fallback"))
+def test_stt_router_falls_back_only_on_fallback_eligible_error() -> None:
+    primary = _FakeSttAdapter(
+        provider_name="openai", error=SttFallbackEligibleError("transient failure")
+    )
+    fallback = _FakeSttAdapter(
+        provider_name="faster_whisper", result=_stt_result(provider="faster_whisper")
+    )
     router = SttProviderRouter(primary=primary, fallback=fallback)
 
-    result = asyncio.run(router.transcribe("audio.wav", SttOptions()))
+    result = asyncio.run(router.transcribe("audio.wav", SttOptions(client_id="test")))
 
-    assert result.provider == "faster_whisper_fallback"
+    assert result.provider == "faster_whisper"
     assert result.fallback_used is True
+
+
+def test_stt_router_does_not_fall_back_on_non_fallback_eligible_error() -> None:
+    # e.g. a fail-loud auth/billing error must never be silently masked by a fallback.
+    primary = _FakeSttAdapter(provider_name="openai", error=RuntimeError("bad api key"))
+    fallback = _FakeSttAdapter(provider_name="faster_whisper", result=_stt_result())
+    router = SttProviderRouter(primary=primary, fallback=fallback)
+
+    with pytest.raises(RuntimeError, match="bad api key"):
+        asyncio.run(router.transcribe("audio.wav", SttOptions(client_id="test")))
+    assert fallback.calls == 0
+
+
+def test_stt_router_resolve_provider_supports_override() -> None:
+    primary = _FakeSttAdapter(provider_name="openai", result=_stt_result(provider="openai"))
+    fallback = _FakeSttAdapter(
+        provider_name="faster_whisper", result=_stt_result(provider="faster_whisper")
+    )
+    router = SttProviderRouter(primary=primary, fallback=fallback)
+
+    result = asyncio.run(
+        router.transcribe("audio.wav", SttOptions(client_id="test"), provider_override="faster_whisper")
+    )
+
+    assert result.provider == "faster_whisper"
+    assert primary.calls == 0
+    assert fallback.calls == 1
 
 
 class _FakeTtsAdapter:

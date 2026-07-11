@@ -3,7 +3,9 @@ import asyncio
 
 from app.config import settings
 from app.providers.faster_whisper import FasterWhisperAdapter
+from app.providers.openai_stt import OpenAiSttAdapter
 from app.providers.pocket_tts import PocketTtsAdapter
+from app.providers.policy import RequestValidationPolicy
 from app.providers.router import SttProviderRouter, TtsProviderRouter
 from app.services.stt_service import SttService
 from app.services.tts_service import TtsService
@@ -18,12 +20,16 @@ tts_service: TtsService | None = None
 stt_router: SttProviderRouter | None = None
 tts_router: TtsProviderRouter | None = None
 
+# Shared for the process lifetime so the daily quota counter (setara-s94o.9) actually accumulates
+# across requests instead of resetting every time build_routers() runs.
+stt_policy = RequestValidationPolicy()
+
 # One job at a time by default — protects the capped container from OOM/CPU contention.
 stt_semaphore = asyncio.Semaphore(settings.max_concurrent_stt)
 tts_semaphore = asyncio.Semaphore(settings.max_concurrent_tts)
 
-SUPPORTED_STT_PROVIDERS = {"faster_whisper"}
-SUPPORTED_STT_FALLBACK_PROVIDERS = {"none", "faster_whisper"}
+SUPPORTED_STT_PROVIDERS = {"faster_whisper", "openai"}
+SUPPORTED_STT_FALLBACK_PROVIDERS = {"none", "faster_whisper", "openai"}
 SUPPORTED_TTS_PROVIDERS = {"pocket_tts"}
 SUPPORTED_TTS_FALLBACK_PROVIDERS = {"none", "pocket_tts"}
 
@@ -57,10 +63,12 @@ def validate_provider_config() -> None:
 
 
 def build_stt_adapter(provider: str, service: SttService | None):
-    if provider == "none" or service is None:
+    if provider == "none":
         return None
     if provider == "faster_whisper":
-        return FasterWhisperAdapter(service)
+        return FasterWhisperAdapter(service) if service is not None else None
+    if provider == "openai":
+        return OpenAiSttAdapter()
     raise UnsupportedProviderError(f"STT provider {provider!r} has no adapter yet")
 
 
@@ -80,7 +88,10 @@ def build_routers() -> None:
     stt_primary = build_stt_adapter(settings.stt_provider, stt_service)
     stt_fallback_name = settings.stt_fallback_provider if settings.stt_fallback_provider != settings.stt_provider else "none"
     stt_fallback = build_stt_adapter(stt_fallback_name, stt_service)
-    stt_router = SttProviderRouter(primary=stt_primary, fallback=stt_fallback) if stt_primary else None
+    stt_router = (
+        SttProviderRouter(primary=stt_primary, fallback=stt_fallback, policy=stt_policy)
+        if stt_primary else None
+    )
 
     tts_primary = build_tts_adapter(settings.tts_provider, tts_service)
     tts_fallback_name = settings.tts_fallback_provider if settings.tts_fallback_provider != settings.tts_provider else "none"

@@ -39,11 +39,9 @@ class Settings(BaseSettings):
     stt_final_word_timestamps: bool = False
     stt_final_vad_filter: bool = True
     stt_final_condition_on_previous: bool = False
-    stt_vad_filter: bool = True
     # Decode-quality knobs: drop silence/hallucinations, don't carry context between clips (faster,
     # avoids the model "completing" a previous sentence into the next short command).
     stt_no_speech_threshold: float = 0.6
-    stt_condition_on_previous: bool = False
     stt_vad_min_silence_ms: int = 300
     # Anti-repetition: Whisper sometimes loops a phrase ("can you can you can you…"). repetition_penalty
     # + no_repeat_ngram_size discourage it during decode; compression_ratio_threshold flags a degenerate
@@ -56,10 +54,6 @@ class Settings(BaseSettings):
     stt_temperatures: tuple[float, ...] = (0.0, 0.2, 0.4)
     # Bias decoding toward the assistant name and domain vocabulary so "ASA" isn't heard as "Elsa",
     # "Setara" as "set are", etc. initial_prompt seeds context; hotwords boosts these tokens.
-    stt_prompt: str = (
-        "This is a voice command for ASA, the AI assistant inside Setara, a test management "
-        "platform with projects, plans, builds, scenarios, squads, and tribes."
-    )
     stt_hotwords: str = "ASA Setara"
     # Rolling-window streaming (WS /stt/stream): re-decode the buffer at most this often. Lower =
     # snappier partials but more CPU; ~600ms balances latency vs decode cost on a 4-core box.
@@ -71,11 +65,31 @@ class Settings(BaseSettings):
     # Useful when the browser's VAD is energy-only and misses a pause. Set 0 to disable.
     stt_stream_silence_flush_s: float = 1.5
 
+    # OpenAI hosted STT (setara-s94o.6/.7/.8). gpt-4o-mini-transcribe/gpt-4o-transcribe only support
+    # the json/text response formats (no segment timestamps, no reported audio duration).
+    openai_api_key: str = ""
+    openai_stt_model: str = "gpt-4o-mini-transcribe"
+    openai_stt_timeout_seconds: int = 30
+    # Short domain glossary bias (plan §8.2) — used as options.prompt's default when the caller
+    # (stt_context.py) doesn't already supply a more specific one. Deliberately short: OpenAI's
+    # transcription prompt is a priming glossary, not a place to dump the whole product manual.
+    openai_stt_prompt: str = (
+        "Common product terms: Setara, Raksara, scenario, test case, suite, execution, build, "
+        "release plan, coverage, rerun failed, automation coverage, squad, tribe."
+    )
+
+    # Policy layer v1 (setara-s94o.9) — request validation before any provider runs, plus an
+    # in-memory per-client daily quota. File-size validation reuses the existing max_upload_mb.
+    # Plan §10.2 recommends 30s/request, but /stt already supports long PTT dictation up to
+    # max_upload_seconds (see KNOWLEDGE.md, bd setara-gwfj) — default here matches that instead of
+    # silently regressing it; tighten via env var for cost-sensitive hosted deployments.
+    max_stt_seconds_per_request: int = 300
+    max_stt_seconds_per_client_per_day: int = 600
+
     # TTS (Pocket TTS — behind TtsService adapter)
     tts_engine: str = "pocket-tts"
     tts_default_voice: str = "asa_default"
     tts_default_model: str = "pocket-low"
-    tts_format: str = "wav"
     tts_sample_rate: int = 24000
     tts_max_text_chars: int = 600
     # torch.compile the model once at startup (reduce-overhead) — first synth pays the compile cost,

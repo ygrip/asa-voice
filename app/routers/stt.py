@@ -23,9 +23,10 @@ from fastapi import (
 from fastapi.concurrency import run_in_threadpool
 
 from app import runtime
-from app.auth import require_api_key, validate_key
+from app.auth import provider_override_allowed, require_api_key, validate_key
 from app.config import settings
 from app.providers.base import SttOptions
+from app.providers.errors import SttFailLoudError, SttFallbackEligibleError, SttPolicyRejectedError
 from app.schemas import SttResponse, stt_response
 from app.services import audio_service
 from app.services.stt_service import StreamingSttSession, collapse_repeats
@@ -50,6 +51,26 @@ def _options_from_context(
     )
 
 
+def _resolve_provider_override(requested: str | None, client_id: str) -> str | None:
+    """Explicit provider= override (plan §6.2 / setara-s94o.8). Disabled globally unless
+    STT_ALLOW_PROVIDER_OVERRIDE=true, and even then only honored for a client whose configured
+    trust tier allows it (development/admin/test) - a production-tier or unknown client's
+    override request is silently ignored rather than rejected, so it just gets the default
+    provider instead of an error."""
+    if not requested or requested == "auto":
+        return None
+    if not settings.stt_allow_provider_override:
+        log.info("provider override '%s' requested but overrides are disabled; ignoring", requested)
+        return None
+    if not provider_override_allowed(client_id):
+        log.info(
+            "provider override '%s' requested by client '%s' whose trust tier disallows it; ignoring",
+            requested, client_id,
+        )
+        return None
+    return requested
+
+
 @router.post("/stt/raw", response_model=SttResponse)
 async def stt_raw(
     request: Request,
@@ -58,6 +79,7 @@ async def stt_raw(
     x_sample_format: str = Header(default="s16le"),
     x_stt_context: str | None = Header(default=None),
     x_request_id: str | None = Header(default=None),
+    provider: str | None = Query(default=None),
     _client_id: str = Depends(require_api_key),
 ) -> SttResponse:
     if runtime.stt_router is None:
@@ -82,9 +104,22 @@ async def stt_raw(
 
     context = _decode_header_context(x_stt_context)
     options = _options_from_context(context, _client_id, x_request_id)
+    provider_override = _resolve_provider_override(provider, _client_id)
     audio = np.frombuffer(body, dtype="<i2").astype(np.float32) / 32768.0
-    async with runtime.stt_semaphore:
-        result = await runtime.stt_router.transcribe_array(audio, options)
+    try:
+        async with runtime.stt_semaphore:
+            result = await runtime.stt_router.transcribe_array(
+                audio, options, provider_override=provider_override
+            )
+    except SttPolicyRejectedError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except SttFailLoudError as exc:
+        # Never falls back (setara-s94o.7) - a distinct "reason" so callers can show an
+        # actionable billing/auth message instead of a generic "STT unavailable" one.
+        raise HTTPException(status_code=502, detail={"reason": "stt_fail_loud", "message": str(exc)}) from exc
+    except SttFallbackEligibleError as exc:
+        # Reaching here means the fallback provider (if any) also failed - both are down.
+        raise HTTPException(status_code=502, detail={"reason": "stt_unavailable", "message": str(exc)}) from exc
     return stt_response(result, options.request_id)
 
 
@@ -106,6 +141,7 @@ async def stt(
     file: UploadFile = File(...),
     language: str | None = Form(default=None),
     context: str | None = Form(default=None),
+    provider: str | None = Form(default=None),
     x_request_id: str | None = Header(default=None),
     _client_id: str = Depends(require_api_key),
 ) -> SttResponse:
@@ -138,11 +174,37 @@ async def stt(
     try:
         decode_context = SttDecodeContext.model_validate_json(context) if context else None
     except ValueError as exc:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
         raise HTTPException(status_code=400, detail="Invalid STT context") from exc
 
     options = _options_from_context(decode_context, _client_id, x_request_id, language)
-    async with runtime.stt_semaphore:
-        result = await runtime.stt_router.transcribe(path, options)
+    provider_override = _resolve_provider_override(provider, _client_id)
+    try:
+        async with runtime.stt_semaphore:
+            result = await runtime.stt_router.transcribe(
+                path, options, provider_override=provider_override
+            )
+    except SttPolicyRejectedError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except SttFailLoudError as exc:
+        # Never falls back (setara-s94o.7) - a distinct "reason" so callers can show an
+        # actionable billing/auth message instead of a generic "STT unavailable" one.
+        raise HTTPException(status_code=502, detail={"reason": "stt_fail_loud", "message": str(exc)}) from exc
+    except SttFallbackEligibleError as exc:
+        # Reaching here means the fallback provider (if any) also failed - both are down.
+        raise HTTPException(status_code=502, detail={"reason": "stt_unavailable", "message": str(exc)}) from exc
+    finally:
+        # Guaranteed cleanup regardless of which adapter handled the request - the local
+        # faster-whisper engine already removes its own temp file, but a hosted provider (or a
+        # provider= override picking one) never touches the filesystem path, so this must not
+        # rely on the adapter to have done it.
+        try:
+            os.remove(path)
+        except OSError:
+            pass
     return stt_response(result, options.request_id)
 
 

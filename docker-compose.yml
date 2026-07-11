@@ -8,26 +8,12 @@ services:
     container_name: asa-voice
     ports:
       - "8090:8090"   # local dev only; remove/empty in production
-    environment:
-      STT_MODEL: distil-small.en
-      STT_DEVICE: cpu
-      STT_COMPUTE_TYPE: int8
-      STT_LANGUAGE: en
-      STT_CPU_THREADS: 4
-      STT_NUM_WORKERS: 1
-      STT_BEAM_SIZE: 1
-      STT_BEST_OF: 1
-      STT_VAD_FILTER: "true"
-      ALLOWED_CLIENTS: "${ALLOWED_CLIENTS:-local-dev:change-me-local}"
-      MAX_AUDIO_SECONDS: 20
-      MAX_UPLOAD_SECONDS: 300
-      MAX_UPLOAD_MB: 15
-      MAX_CONCURRENT_STT: 1
-      MAX_CONCURRENT_TTS: 1
-      TTS_ENGINE: pocket-tts
-      TTS_DEFAULT_MODEL: pocket-low
-      TTS_DEFAULT_VOICE: asa_default
-      TTS_MAX_TEXT_CHARS: 600
+    # Keep the standalone deployment contract in one place. .env overrides the tracked defaults.
+    env_file:
+      - path: .env.example
+        required: true
+      - path: .env
+        required: false
     deploy:
       resources:
         limits:

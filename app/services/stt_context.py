@@ -20,12 +20,8 @@ class SttDecodeContext(BaseModel):
         return cleaned
 
 
-def build_prompt(context: SttDecodeContext | None) -> str | None:
-    parts = [settings.stt_prompt.strip()]
-    if context is not None and context.prompt:
-        parts.append(context.prompt.strip())
-    prompt = "\n".join(part for part in parts if part)
-    return prompt or None
+# NOTE: no build_prompt() — Whisper initial_prompt terminates decoding after the first segment on
+# gapped/multi-region audio (truncates long utterances). Domain biasing is done via hotwords only.
 
 
 def build_hotwords(context: SttDecodeContext | None) -> str | None:

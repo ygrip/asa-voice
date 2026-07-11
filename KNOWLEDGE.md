@@ -44,10 +44,20 @@
   provider name must fail fast at boot (`runtime.validate_provider_config`, called from `main.py`'s lifespan before
   model loading) — never silently no-op into a broken mode. This is distinct from a model *load* failure, which
   still degrades gracefully (`/health` reports 503, process stays up).
+- An OpenAI-compatible HTTP surface does not make an ASR engine a Faster Whisper model. External engines such as
+  achetronic/parakeet belong behind their own named provider adapter and health boundary. Batch multipart compatibility,
+  file-free PCM finalization, and bidirectional WebSocket partials are separate capabilities and must be gated
+  independently; never promote a provider based only on `/v1/audio/transcriptions` compatibility.
+- Treat STT alternatives by architecture, not branding. LiteASR is a custom Transformers/Triton or MLX Whisper runtime,
+  not a CTranslate2 model; keep it in a batch GPU/MLX benchmark lane. Moonshine's incremental PCM API is a better match
+  for raw finalization and live partials, but current permissive licensing is English-only and Indonesian is unsupported.
+  Evaluate it server-side first so Core authorization, provenance, quotas, and UI contracts remain unchanged.
+- Keep `.env.example` equal to the active `Settings` field set and keep every non-metadata setting referenced by runtime
+  code. Do not retain compatibility variables that Pydantic silently ignores. Platform-prefixed variables must map to
+  these exact sidecar names in `setara-platform/docker-compose.yml`.
 - `app/schemas.py`'s wire-facing models were reconciled, not replaced: `SttResponse` was renamed to the
   provider-agnostic field set (`provider`/`durationMs`/`latencyMs`/`fallbackUsed`/...) since it had exactly one real
   external consumer (`setara-core`'s `AsaVoiceSessionService.resolve()`, updated alongside); `HealthResponse`/
   `ModelsResponse` were extended additively (new `mode`/`provider`/`ready`/`activeProvider` fields sit next to the
   existing `device`/`computeType`/`engine` fields) because those have no real external consumer yet and existing
   tests assert the old field names verbatim.
-

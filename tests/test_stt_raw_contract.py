@@ -13,7 +13,7 @@ def test_raw_stt_validates_pcm_contract_and_bounds() -> None:
     assert 'x_sample_format.lower() != "s16le"' in source
     assert "len(body) % 2 != 0" in source
     assert "settings.max_audio_seconds * 16000" in source
-    assert "stt_router.transcribe_array(audio, options)" in source
+    assert "stt_router.transcribe_array(" in source
 
 
 def test_raw_stt_context_is_base64url_and_bounded() -> None:

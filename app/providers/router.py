@@ -10,26 +10,44 @@ from typing import Optional, Protocol
 import numpy as np
 
 from app.providers.base import (
-    SttAdapter, SttOptions, SttResult, TtsAdapter, TtsOptions, TtsResult,
+    IN_MEMORY_AUDIO_MARKER, SttAdapter, SttOptions, SttResult, TtsAdapter, TtsOptions, TtsResult,
 )
+from app.providers.errors import SttFallbackEligibleError
+
+STT_STREAM_SAMPLE_RATE = 16000  # PCM16 mono @16kHz, matches app/services/stt_service.py
 
 
 class SttPolicy(Protocol):
-    def validate_audio(self, audio_path: str, options: SttOptions) -> None: ...
+    def validate_audio(
+        self, audio_path: str, options: SttOptions, duration_seconds: Optional[float]
+    ) -> None: ...
+
+    def record_usage(self, options: SttOptions, duration_seconds: Optional[float]) -> None: ...
 
 
 class NoopSttPolicy:
     """Phase 1 stub — real request validation + quota enforcement lands in setara-s94o.9
-    (policy layer v1). Exists now so the router's call site never has to change shape."""
+    (policy layer v1, app/providers/policy.py:RequestValidationPolicy). Exists so the router's
+    call site never has to change shape when the real policy is wired in."""
 
-    def validate_audio(self, audio_path: str, options: SttOptions) -> None:
+    def validate_audio(
+        self, audio_path: str, options: SttOptions, duration_seconds: Optional[float]
+    ) -> None:
+        return None
+
+    def record_usage(self, options: SttOptions, duration_seconds: Optional[float]) -> None:
         return None
 
 
 class SttProviderRouter:
     """Selects a primary STT adapter, falling back to a secondary one (if configured) when the
-    primary raises. `fallback` is None in local-only Phase 1 configs — every existing caller works
-    unchanged with a single provider; Phase 2 only needs to pass a second adapter in."""
+    primary raises SttFallbackEligibleError. `fallback` is None in local-only configs — every
+    existing caller works unchanged with a single provider.
+
+    Also supports an explicit per-request provider override (setara-s94o.8) for trusted clients —
+    routers/stt.py decides *whether* an override is allowed (trust tier); this class only resolves
+    the requested provider name to an adapter, it does not itself enforce any trust policy.
+    """
 
     def __init__(
         self,
@@ -40,30 +58,63 @@ class SttProviderRouter:
         self.primary = primary
         self.fallback = fallback
         self.policy = policy or NoopSttPolicy()
+        self._by_name: dict[str, SttAdapter] = {}
+        for adapter in (primary, fallback):
+            if adapter is not None:
+                self._by_name[getattr(adapter, "provider_name", "")] = adapter
 
-    async def transcribe(self, audio_path: str, options: SttOptions) -> SttResult:
-        self.policy.validate_audio(audio_path, options)
+    def resolve_provider(self, provider_name: str) -> Optional[SttAdapter]:
+        """Look up a named adapter for an explicit provider= override. Returns None if the
+        provider isn't wired into this router (caller decides how to handle that: ignore the
+        override and use the default primary, or reject the request)."""
+        return self._by_name.get(provider_name)
+
+    async def transcribe(
+        self, audio_path: str, options: SttOptions, provider_override: Optional[str] = None
+    ) -> SttResult:
+        primary = self.resolve_provider(provider_override) if provider_override else self.primary
+        duration_seconds = _probe_file_duration_seconds(audio_path)
+        self.policy.validate_audio(audio_path, options, duration_seconds)
         try:
-            return await self.primary.transcribe(audio_path, options)
-        except Exception as primary_error:
-            if not self.fallback:
-                raise primary_error
+            result = await primary.transcribe(audio_path, options)
+        except SttFallbackEligibleError:
+            if not self.fallback or self.fallback is primary:
+                raise
             result = await self.fallback.transcribe(audio_path, options)
             result.fallback_used = True
-            return result
+        self.policy.record_usage(options, duration_seconds)
+        return result
 
-    async def transcribe_array(self, audio: "np.ndarray", options: SttOptions) -> SttResult:
+    async def transcribe_array(
+        self,
+        audio: "np.ndarray",
+        options: SttOptions,
+        provider_override: Optional[str] = None,
+    ) -> SttResult:
         """File-free variant for /stt/raw and streaming session flush — local-only fast path;
-        no adapter is required to implement it (hosted providers only get `transcribe`)."""
-        self.policy.validate_audio("<in-memory>", options)
+        an adapter is not required to implement it (hosted providers only get `transcribe`)."""
+        primary = self.resolve_provider(provider_override) if provider_override else self.primary
+        duration_seconds = audio.shape[0] / STT_STREAM_SAMPLE_RATE if audio is not None else None
+        self.policy.validate_audio(IN_MEMORY_AUDIO_MARKER, options, duration_seconds)
         try:
-            return await self.primary.transcribe_array(audio, options)
-        except Exception as primary_error:
-            if not self.fallback or not hasattr(self.fallback, "transcribe_array"):
-                raise primary_error
+            result = await primary.transcribe_array(audio, options)
+        except SttFallbackEligibleError:
+            if not self.fallback or self.fallback is primary or not hasattr(
+                self.fallback, "transcribe_array"
+            ):
+                raise
             result = await self.fallback.transcribe_array(audio, options)
             result.fallback_used = True
-            return result
+        self.policy.record_usage(options, duration_seconds)
+        return result
+
+
+def _probe_file_duration_seconds(audio_path: str) -> Optional[float]:
+    if audio_path == IN_MEMORY_AUDIO_MARKER:
+        return None
+    from app.services import audio_service  # local import: keeps router.py free of a hard,
+    # module-level dependency on the ffprobe-backed helper for callers that never touch files.
+    return audio_service.probe_duration_seconds(audio_path)
 
 
 class TtsProviderRouter:
