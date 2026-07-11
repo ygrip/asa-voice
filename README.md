@@ -1,3 +1,5 @@
+<p align="center"><img src="./asa-idle.gif" alt="ASA idle" width="120" /></p>
+
 <h1 align="center">asa-voice</h1>
 
 <p align="center">Self-hosted voice sidecar for ASA — faster-whisper STT + Pocket TTS, packaged for Docker</p>
