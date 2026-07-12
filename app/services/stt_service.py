@@ -1,5 +1,6 @@
+import logging
 import os
-from collections import deque
+import time
 
 import numpy as np
 from faster_whisper import WhisperModel
@@ -7,7 +8,7 @@ from faster_whisper import WhisperModel
 from app.config import settings
 from app.services.stt_context import SttDecodeContext, build_hotwords, resolve_language
 
-STREAM_SAMPLE_RATE = 16000  # faster-whisper's native rate; the WS client sends PCM16 mono @ 16 kHz
+log = logging.getLogger("asa.stt.service")
 
 
 class SttService:
@@ -82,7 +83,17 @@ class SttService:
             vad_filter=settings.stt_partial_vad_filter,
             beam_size=settings.stt_partial_beam_size,
             best_of=settings.stt_partial_best_of,
-            temperature=settings.stt_temperatures,
+            # Single greedy pass, no temperature-fallback ladder: a short/incomplete rolling-buffer
+            # snippet often decodes to garbage (high compression_ratio) at temp=0, and the full
+            # accuracy ladder (settings.stt_temperatures) used by the final profile then re-decodes
+            # the WHOLE snippet at each successive temperature - a live capture showed this taking
+            # 13s for 1s of audio on a partial. flush() blocks on this in-flight decode before the
+            # final can even start (_settle_decoder in stt_stream_scheduler.py), so a slow partial
+            # was adding 10+ seconds of pure dead time to every command's response (setara-s94o STT
+            # latency incident). Partial text is a live-preview/last-resort-fallback value only
+            # (see stt-session.ts finishDegraded()), never the authoritative transcript, so it isn't
+            # worth the accuracy ladder's cost.
+            temperature=0.0,
             repetition_penalty=settings.stt_repetition_penalty,
             no_repeat_ngram_size=settings.stt_no_repeat_ngram_size,
             compression_ratio_threshold=settings.stt_compression_ratio_threshold,
@@ -105,6 +116,9 @@ class SttService:
         self, audio: np.ndarray, context: SttDecodeContext | None = None
     ) -> dict:
         """Decode a complete utterance with the accuracy profile used for command execution."""
+        hotwords = build_hotwords(context)
+        audio_seconds = audio.size / 16000
+        started = time.monotonic()
         segments, info = self.model.transcribe(
             audio,
             language=resolve_language(context),
@@ -120,16 +134,42 @@ class SttService:
             condition_on_previous_text=settings.stt_final_condition_on_previous,
             no_speech_threshold=settings.stt_no_speech_threshold,
             # No initial_prompt (see transcribe): avoids first-segment early-termination.
-            hotwords=build_hotwords(context),
+            hotwords=hotwords,
             word_timestamps=settings.stt_final_word_timestamps,
         )
         collected = []
         full_text = []
+        segment_count = 0
+        # faster-whisper's `segments` is a lazy generator - the actual beam-search/temperature-
+        # fallback decode work happens HERE, during iteration, not in the model.transcribe() call
+        # above. `temperature` > 0.0 on a segment means the first (greedy) pass failed the
+        # compression_ratio/log_prob/no_speech quality gates and got re-decoded from scratch at a
+        # higher temperature - each retry is a full extra decode pass, which is the usual cause of
+        # a final decode taking noticeably longer than the audio itself (RTF > 1).
         for segment in segments:
+            segment_count += 1
+            log.debug(
+                "stt final segment temp=%.2f avg_logprob=%.3f compression_ratio=%.3f "
+                "no_speech_prob=%.3f text=%r",
+                segment.temperature,
+                segment.avg_logprob,
+                segment.compression_ratio,
+                segment.no_speech_prob,
+                segment.text,
+            )
             text = segment.text.strip()
             if text:
                 full_text.append(text)
                 collected.append({"start": segment.start, "end": segment.end, "text": text})
+        elapsed = time.monotonic() - started
+        log.info(
+            "stt final decode audio_s=%.2f elapsed_s=%.2f rtf=%.2f segments=%d hotwords=%d",
+            audio_seconds,
+            elapsed,
+            elapsed / audio_seconds if audio_seconds > 0 else 0.0,
+            segment_count,
+            len(hotwords.split()) if hotwords else 0,
+        )
         return {
             "text": collapse_repeats(" ".join(full_text).strip()),
             "segments": collected,
@@ -138,196 +178,6 @@ class SttService:
             "engine": "faster-whisper",
             "model": settings.stt_model,
         }
-
-
-class StreamingSttSession:
-    """Rolling-window streaming transcription (the whisper_streaming technique). The client pushes
-    PCM16 frames continuously; every stt_stream_interval_ms we re-decode the buffered audio and use
-    LocalAgreement-2 — words that agree across the two most recent decodes get COMMITTED (final),
-    the unstable tail stays tentative (partial). On flush (VAD silence / stop) the tail commits too.
-
-    NOT thread-safe; one session per connection, decodes serialized by the caller's STT slot."""
-
-    def __init__(self, service: "SttService"):
-        self._svc = service
-        self._context: SttDecodeContext | None = None
-        self._chunks: deque[np.ndarray] = deque()
-        self._total_samples = 0
-        self._buf_offset_s = 0.0  # audio (seconds) already trimmed off the front of _buf
-        self._committed: list[str] = []  # committed word texts (the final transcript so far)
-        self._prev: list[dict] = []      # previous decode's words (absolute times)
-        self._samples_since_decode = 0
-        # Full utterance kept for the flush re-decode. Bounded to MAX_AUDIO_SECONDS: while it fits,
-        # flush decodes the whole utterance as one VAD-filtered unit (cleanest, full Whisper context).
-        # Once it overflows we set _utterance_capped and flush falls back to committed-words + tail.
-        self._utterance: deque[np.ndarray] = deque()
-        self._utterance_samples = 0
-        self._utterance_capped = False
-
-    @property
-    def committed_text(self) -> str:
-        return " ".join(self._committed).strip()
-
-    def configure(self, context: SttDecodeContext) -> None:
-        self._context = context
-
-    def reset(self) -> None:
-        self._chunks.clear()
-        self._total_samples = 0
-        self._buf_offset_s = 0.0
-        self._committed = []
-        self._prev = []
-        self._agreed_len = 0
-        self._samples_since_decode = 0
-        self._utterance.clear()
-        self._utterance_samples = 0
-        self._utterance_capped = False
-
-    def add_pcm(self, pcm_bytes: bytes) -> None:
-        if not pcm_bytes:
-            return
-        samples = np.frombuffer(pcm_bytes, dtype="<i2").astype(np.float32) / 32768.0
-        self._chunks.append(samples)
-        self._total_samples += samples.size
-        self._samples_since_decode += samples.size
-        self._utterance.append(samples)
-        self._utterance_samples += samples.size
-        max_samples = settings.max_audio_seconds * STREAM_SAMPLE_RATE
-        # Cap the rolling re-decode window so per-decode cost stays bounded. Committed words survive
-        # the trim (kept in self._committed), so the transcript is not lost.
-        if self._total_samples > max_samples:
-            drop = self._total_samples - max_samples
-            self._drop_samples(self._chunks, drop)
-            self._buf_offset_s += drop / STREAM_SAMPLE_RATE
-        # Cap the full-utterance buffer too. Once it overflows, flush can no longer decode the whole
-        # utterance in one pass, so it switches to committed-words + tail (see flush).
-        if self._utterance_samples > max_samples:
-            self._utterance_capped = True
-            drop = self._utterance_samples - max_samples
-            self._drop_utterance(drop)
-
-    def should_decode(self) -> bool:
-        interval = settings.stt_stream_interval_ms / 1000.0 * STREAM_SAMPLE_RATE
-        if self._samples_since_decode < interval or self._total_samples == 0:
-            return False
-        if settings.stt_stream_energy_threshold > 0:
-            audio = self._rolling_audio()
-            rms = float(np.sqrt(np.mean(audio ** 2)))
-            if rms < settings.stt_stream_energy_threshold:
-                return False
-        return True
-
-    def has_buffered_audio(self) -> bool:
-        return self._total_samples > 0
-
-    def is_silent(self) -> bool:
-        """True if the current buffer RMS is below the energy threshold."""
-        if settings.stt_stream_energy_threshold <= 0 or self._total_samples == 0:
-            return False
-        audio = self._rolling_audio()
-        rms = float(np.sqrt(np.mean(audio ** 2)))
-        return rms < settings.stt_stream_energy_threshold
-
-    def decode(self) -> dict:
-        """Re-decode the buffer and apply LocalAgreement-2. Returns {committed, partial}."""
-        self._samples_since_decode = 0
-        words = self._svc.decode_words(self._rolling_audio(), self._context)
-        for w in words:  # shift to absolute time so trimming survives across decodes
-            w["start"] += self._buf_offset_s
-            w["end"] += self._buf_offset_s
-
-        newly = self._commit_agreement(words)
-        partial = " ".join(w["w"] for w in words[self._agreed_len:])
-        self._prev = words
-        self._trim()
-        return {"committed": newly, "partial": partial.strip()}
-
-    def flush(self) -> dict:
-        """End of utterance → final transcript.
-
-        Common case (utterance fits the window): decode the WHOLE utterance in one pass with the
-        accurate profile. Whisper sees full context and VAD-trims trailing silence, so the result
-        matches the batch /stt endpoint — no truncation, no tail hallucinations.
-
-        Over-long case (utterance outgrew the window): the front was dropped, so a full re-decode
-        would be truncated/garbled. Fall back to the LocalAgreement-committed words (accumulated
-        across the whole utterance) + an accurate decode of the un-committed rolling tail. This
-        stays complete for arbitrarily long dictation, trading a little accuracy for completeness.
-        """
-        if not self._utterance_capped:
-            audio = self._utterance_audio()
-            final = self._svc.transcribe_array_final(audio, self._context)["text"] if audio.size else ""
-        else:
-            tail_audio = self._rolling_audio()
-            tail = self._svc.transcribe_array_final(tail_audio, self._context)["text"] if tail_audio.size else ""
-            final = (self.committed_text + " " + tail).strip()
-        final = collapse_repeats(final)
-        self.reset()
-        return {"final": final}
-
-    _agreed_len = 0  # how many words of the current decode are confirmed committed
-
-    def _commit_agreement(self, cur: list[dict]) -> str:
-        # Longest common prefix (by word text) of the two most recent decodes = the agreed region.
-        n = 0
-        while n < len(cur) and n < len(self._prev) and _norm(cur[n]["w"]) == _norm(self._prev[n]["w"]):
-            n += 1
-        newly = [w["w"] for w in cur[self._agreed_len:n]]
-        self._committed.extend(newly)
-        self._agreed_len = n
-        return " ".join(newly).strip()
-
-    def _trim(self) -> None:
-        # Drop audio up to the end of the last committed word so re-decode cost stays bounded.
-        if self._agreed_len == 0:
-            return
-        cut_s = self._prev[self._agreed_len - 1]["end"] - self._buf_offset_s
-        cut_samples = int(max(0.0, cut_s) * STREAM_SAMPLE_RATE)
-        if cut_samples > 0 and cut_samples < self._total_samples:
-            self._drop_samples(self._chunks, cut_samples)
-            self._buf_offset_s += cut_samples / STREAM_SAMPLE_RATE
-            self._prev = self._prev[self._agreed_len:]
-            self._agreed_len = 0
-
-    def _rolling_audio(self) -> np.ndarray:
-        if not self._chunks:
-            return np.zeros(0, dtype=np.float32)
-        return np.concatenate(tuple(self._chunks))
-
-    def _utterance_audio(self) -> np.ndarray:
-        if not self._utterance:
-            return np.zeros(0, dtype=np.float32)
-        return np.concatenate(tuple(self._utterance))
-
-    def _drop_utterance(self, count: int) -> None:
-        remaining = count
-        while remaining > 0 and self._utterance:
-            chunk = self._utterance[0]
-            if chunk.size <= remaining:
-                self._utterance.popleft()
-                removed = chunk.size
-            else:
-                self._utterance[0] = chunk[remaining:]
-                removed = remaining
-            remaining -= removed
-            self._utterance_samples -= removed
-
-    def _drop_samples(self, chunks: deque[np.ndarray], count: int) -> None:
-        remaining = count
-        while remaining > 0 and chunks:
-            chunk = chunks[0]
-            if chunk.size <= remaining:
-                chunks.popleft()
-                removed = chunk.size
-            else:
-                chunks[0] = chunk[remaining:]
-                removed = remaining
-            remaining -= removed
-            self._total_samples -= removed
-
-
-def _norm(word: str) -> str:
-    return "".join(c for c in word.lower() if c.isalnum())
 
 
 def collapse_repeats(text: str, max_reps: int = 2) -> str:

@@ -13,8 +13,9 @@ from app.providers.base import (
     IN_MEMORY_AUDIO_MARKER, SttAdapter, SttOptions, SttResult, TtsAdapter, TtsOptions, TtsResult,
 )
 from app.providers.errors import SttFallbackEligibleError
+from app.services.operation_limiter import OperationBusyError
 
-STT_STREAM_SAMPLE_RATE = 16000  # PCM16 mono @16kHz, matches app/services/stt_service.py
+STT_STREAM_SAMPLE_RATE = 16000  # PCM16 mono @16kHz streaming contract
 
 
 class SttPolicy(Protocol):
@@ -128,6 +129,8 @@ class TtsProviderRouter:
     async def synthesize(self, text: str, options: TtsOptions) -> TtsResult:
         try:
             return await self.primary.synthesize(text, options)
+        except OperationBusyError:
+            raise
         except Exception as primary_error:
             if not self.fallback:
                 raise primary_error

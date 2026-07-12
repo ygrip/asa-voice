@@ -25,8 +25,11 @@ class PocketTtsAdapter:
         self.service = service
 
     async def synthesize(self, text: str, options: TtsOptions) -> TtsResult:
+        from app import runtime
+
         started = time.monotonic()
-        wav_bytes = await run_in_threadpool(self.service.synthesize, text, options.voice_id)
+        async with runtime.tts_limiter.slot():
+            wav_bytes = await run_in_threadpool(self.service.synthesize, text, options.voice_id)
         path = audio_service.write_temp(wav_bytes, ".wav")
         latency_ms = int((time.monotonic() - started) * 1000)
         return TtsResult(
