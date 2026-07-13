@@ -90,6 +90,43 @@ class Settings(BaseSettings):
     # Useful when the browser's VAD is energy-only and misses a pause. Set 0 to disable.
     stt_stream_silence_flush_s: float = 1.5
 
+    # Per-mode partial-decode enablement (ASA STT accuracy/latency recovery plan, RC-05). Command
+    # mode never runs a partial decoder (see routers/stt.py) - these two flags extend that to
+    # dictation/hands_free: false by default because flush() blocks on any in-flight partial before
+    # the final decode can start (_settle_decoder in stt_stream_scheduler.py), and a slow model can
+    # make that wait 7-12s+. If re-enabled, widen STT_STREAM_INTERVAL_MS/
+    # STT_STREAM_MAX_PARTIAL_INTERVAL_MS (e.g. 2500/5000) so partials can't outrun the final decode.
+    stt_dictation_partials_enabled: bool = False
+    stt_handsfree_partials_enabled: bool = False
+
+    # Per-mode final-decode profiles (RC-06): the final profile previously always retried at
+    # settings.stt_temperatures=[0.0,0.2,0.4] for every mode, multiplying latency whenever the
+    # quality gates rejected the greedy pass - expensive for a short command. A SINGLE temperature
+    # (no fallback) went too far the other way: this session's own captures showed temp=0.0 alone
+    # failing the log_prob/compression_ratio gate on real (non-noise) audio again and again, with
+    # temp=0.2 the one that actually succeeded - with no fallback, that failure has nowhere to go and
+    # faster-whisper returns empty text, which the client reports as "Could not understand audio"
+    # even though the user was heard fine. Keep one cheap fallback step (only paid when temp=0.0's
+    # segment fails its own quality gate, not on every decode) instead of trusting the single-value
+    # recommendation over what was actually observed.
+    stt_command_beam_size: int = 2
+    stt_command_best_of: int = 2
+    stt_command_temperatures: tuple[float, ...] = (0.0, 0.2)
+    stt_command_vad_filter: bool = False
+    stt_command_condition_on_previous: bool = False
+
+    stt_dictation_beam_size: int = 3
+    stt_dictation_best_of: int = 3
+    stt_dictation_temperatures: tuple[float, ...] = (0.0, 0.2)
+    stt_dictation_vad_filter: bool = False
+    stt_dictation_condition_on_previous: bool = True
+
+    stt_handsfree_beam_size: int = 2
+    stt_handsfree_best_of: int = 2
+    stt_handsfree_temperatures: tuple[float, ...] = (0.0, 0.2)
+    stt_handsfree_vad_filter: bool = False
+    stt_handsfree_condition_on_previous: bool = False
+
     # OpenAI hosted STT (setara-s94o.6/.7/.8). gpt-4o-mini-transcribe/gpt-4o-transcribe only support
     # the json/text response formats (no segment timestamps, no reported audio duration).
     openai_api_key: str = ""

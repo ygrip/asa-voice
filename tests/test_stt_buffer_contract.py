@@ -22,7 +22,7 @@ def test_flush_decodes_full_utterance_when_it_fits() -> None:
 
     assert "if not self._utterance_capped:" in flush
     assert "self._utterance_audio()" in flush
-    assert "self._service.transcribe_array_final(audio, self._context)" in flush
+    assert "self._service.transcribe_array_final(audio, self._context, mode)" in flush
 
 
 def test_flush_falls_back_to_committed_plus_tail_when_capped() -> None:

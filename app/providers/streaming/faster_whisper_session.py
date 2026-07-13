@@ -35,7 +35,6 @@ class FasterWhisperRollingSession:
         self._final_emitted = False
         self._received_bytes = 0
         self._received_samples = 0
-        self._queued_speech_samples = 0
         self._sequence = 0
         self._capped = False
         self._audio_dropped_ms = 0
@@ -144,22 +143,16 @@ class FasterWhisperRollingSession:
                 "STT_SESSION_DURATION_LIMIT",
                 f"STT session exceeds {options.max_duration_seconds} seconds",
             )
+        # No undecoded-speech queue rejection here (setara-s94o STT recovery, RC-01): command mode
+        # deliberately never runs a partial decode, so a counter that only drains on partial decode
+        # climbed monotonically and false-rejected valid 15s command audio well before its advertised
+        # limit. Optional caption latency must never discard authoritative final audio - duration and
+        # byte limits above are the only legitimate ingestion caps.
         frame_had_speech = _contains_speech(samples)
-        queued_speech = self._queued_speech_samples
-        if frame_had_speech:
-            queued_speech += samples.size
-        max_queue_samples = options.max_queue_ms * options.sample_rate // 1000
-        if queued_speech > max_queue_samples:
-            raise SttStreamError(
-                "STT_STREAM_QUEUE_LIMIT",
-                f"Undecoded speech exceeds {options.max_queue_ms} ms",
-                retryable=True,
-            )
 
         rolling.append_samples(samples)
         self._received_bytes = next_bytes
         self._received_samples = next_samples
-        self._queued_speech_samples = queued_speech
         self._last_frame_had_speech = frame_had_speech
         self._capped = self._capped or rolling.utterance_capped
         self._audio_dropped_ms = rolling.dropped_samples * 1000 // options.sample_rate
@@ -184,18 +177,9 @@ class FasterWhisperRollingSession:
         options, rolling = self._active_session()
         if not rolling.has_buffered_audio():
             return None
-        queued_before_decode = self._queued_speech_samples
         audio, buffer_offset_seconds = rolling.partial_decode_input()
-        try:
-            words = await run_in_threadpool(self._service.decode_words, audio, self._context)
-            result = rolling.apply_partial_decode(words, buffer_offset_seconds)
-        finally:
-            # Frames continue arriving while inference runs. Clear only speech represented by this
-            # snapshot, including after a non-fatal decode error, so overload debt stays honest.
-            self._queued_speech_samples = max(
-                0,
-                self._queued_speech_samples - queued_before_decode,
-            )
+        words = await run_in_threadpool(self._service.decode_words, audio, self._context)
+        result = rolling.apply_partial_decode(words, buffer_offset_seconds)
         self._sequence += 1
         text = collapse_repeats((rolling.committed_text + " " + result["partial"]).strip())
         return SttPartialEvent(
@@ -218,7 +202,7 @@ class FasterWhisperRollingSession:
         self._accepting_audio = False
         started = time.monotonic()
         try:
-            text = await run_in_threadpool(rolling.final_text)
+            text = await run_in_threadpool(rolling.final_text, options.mode)
             finality = "provider_final"
             self._finality = finality
             self._final_emitted = True
@@ -254,7 +238,6 @@ class FasterWhisperRollingSession:
         self._final_emitted = False
         self._received_bytes = 0
         self._received_samples = 0
-        self._queued_speech_samples = 0
         self._sequence = 0
         self._capped = False
         self._audio_dropped_ms = 0
@@ -293,7 +276,6 @@ class FasterWhisperRollingSession:
             return
         if self._rolling is not None:
             self._rolling.reset()
-        self._queued_speech_samples = 0
         self._audio_cleaned = True
         self._cleanup_count += 1
 
@@ -409,14 +391,18 @@ class _RollingTranscription:
         self._trim_committed_audio()
         return {"committed": newly_committed, "partial": partial.strip()}
 
-    def final_text(self) -> str:
+    def final_text(self, mode: str) -> str:
         if not self._utterance_capped:
             audio = self._utterance_audio()
-            final = self._service.transcribe_array_final(audio, self._context)["text"] if audio.size else ""
+            final = (
+                self._service.transcribe_array_final(audio, self._context, mode)["text"]
+                if audio.size
+                else ""
+            )
         else:
             tail_audio = self._rolling_audio()
             tail = (
-                self._service.transcribe_array_final(tail_audio, self._context)["text"]
+                self._service.transcribe_array_final(tail_audio, self._context, mode)["text"]
                 if tail_audio.size
                 else ""
             )

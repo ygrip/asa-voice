@@ -25,7 +25,7 @@ class _FakeSttService:
         duration = audio.size / 16_000
         return [{"w": "hello", "start": 0.0, "end": max(0.001, duration * 0.8)}]
 
-    def transcribe_array_final(self, audio: np.ndarray, context) -> dict:
+    def transcribe_array_final(self, audio: np.ndarray, context, mode: str = "command") -> dict:
         return {"text": "hello" if audio.size else ""}
 
 
@@ -45,7 +45,7 @@ class _MarkerSttService:
             }
         ]
 
-    def transcribe_array_final(self, audio: np.ndarray, context) -> dict:
+    def transcribe_array_final(self, audio: np.ndarray, context, mode: str = "command") -> dict:
         if audio.size == 0:
             return {"text": ""}
         marker = int(round(float(audio[-1]) * 32768))
@@ -165,11 +165,6 @@ def test_lifecycle_flushes_once_then_reset_and_close_clean_state() -> None:
             [b"\xd0\x07" * 16_000, b"\xd0\x07"],
             "STT_SESSION_DURATION_LIMIT",
         ),
-        (
-            {"max_queue_ms": 20},
-            [b"\xd0\x07" * 320, b"\xd0\x07" * 320],
-            "STT_STREAM_QUEUE_LIMIT",
-        ),
     ],
 )
 def test_limits_fail_with_explicit_codes(
@@ -186,6 +181,39 @@ def test_limits_fail_with_explicit_codes(
             for frame in frames:
                 await session.append_pcm(frame)
         assert raised.value.code == expected_code
+
+    asyncio.run(exercise())
+
+
+def test_command_accepts_15_seconds_without_partial_decoder() -> None:
+    """RC-01: command mode never calls decode_partial(), so a counter that only drained on
+    partial decode is not a valid ingestion cap - a full 15s command must be ingestible on
+    append_pcm() alone."""
+    session = FasterWhisperRollingSession(_FakeSttService())
+    options = _options(max_duration_seconds=15, max_queue_ms=2_000)
+
+    async def exercise() -> None:
+        await session.configure(options)
+        loud_frame = _pcm_frame(2_000)  # above stt_stream_energy_threshold -> "has speech"
+        for _ in range(750):  # 750 * 20ms = 15s
+            await session.append_pcm(loud_frame)
+        assert session.state.duration_ms == 15_000
+
+    asyncio.run(exercise())
+
+
+def test_command_does_not_raise_stream_queue_limit() -> None:
+    """RC-01: even a pathologically tiny max_queue_ms must never reject audio - the
+    undecoded-speech queue rejection mechanism is gone, not just tuned looser."""
+    session = FasterWhisperRollingSession(_FakeSttService())
+    options = _options(max_queue_ms=20)
+
+    async def exercise() -> None:
+        await session.configure(options)
+        loud_frame = _pcm_frame(2_000)
+        for _ in range(5):
+            await session.append_pcm(loud_frame)
+        assert session.state.duration_ms == 5 * 20
 
     asyncio.run(exercise())
 
@@ -262,6 +290,9 @@ def test_reader_services_control_while_partial_decode_is_blocked(
     monkeypatch.setattr(settings, "stt_fallback_provider", "none")
     monkeypatch.setattr(settings, "stt_stream_interval_ms", 20)
     monkeypatch.setattr(settings, "stt_stream_max_partial_interval_ms", 80)
+    # Dictation is final-only by default too (RC-05) - opt back in explicitly so this test's premise
+    # (a blocked in-flight partial) has a partial decoder running to block in the first place.
+    monkeypatch.setattr(settings, "stt_dictation_partials_enabled", True)
     service = _BlockingPartialService()
     runtime.stt_service = service
     runtime.stt_router = SttProviderRouter(primary=_LocalAdapter())
@@ -269,7 +300,9 @@ def test_reader_services_control_while_partial_decode_is_blocked(
     app.include_router(stt.router)
 
     with TestClient(app).websocket_connect("/stt/stream") as socket:
-        socket.send_json(_start(max_duration=1).model_dump(by_alias=True))
+        # command mode never starts the partial decoder (RC-01/scheduler.start() gating) - use
+        # dictation here, the only mode this test's premise (a blocked in-flight partial) applies to.
+        socket.send_json(_start(max_duration=1, mode="dictation").model_dump(by_alias=True))
         assert socket.receive_json()["type"] == "ready"
         socket.send_bytes(_pcm_frame(1000))
         assert service.decode_started.wait(timeout=1)
@@ -292,6 +325,72 @@ def test_reader_services_control_while_partial_decode_is_blocked(
             if event["type"] == "final":
                 break
         assert event["text"] == "hello"
+
+
+def test_command_flush_never_waits_for_partial_decoder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RC-05: command never starts the partial decoder loop, so flush() has nothing in flight to
+    wait for - even with a service whose decode_words() would otherwise block for 2s."""
+    monkeypatch.setattr(settings, "stt_provider", "faster_whisper")
+    monkeypatch.setattr(settings, "stt_fallback_provider", "none")
+    service = _BlockingPartialService()
+    runtime.stt_service = service
+    runtime.stt_router = SttProviderRouter(primary=_LocalAdapter())
+    app = FastAPI()
+    app.include_router(stt.router)
+
+    with TestClient(app).websocket_connect("/stt/stream") as socket:
+        socket.send_json(_start(max_duration=1, mode="command").model_dump(by_alias=True))
+        assert socket.receive_json()["type"] == "ready"
+        socket.send_bytes(_pcm_frame(1000))
+        socket.send_json({"type": "flush", "reason": "user_stop"})
+        final = socket.receive_json()
+        assert final["type"] == "final"
+        assert final["text"] == "hello"
+        assert not service.decode_started.is_set()
+
+
+def test_dictation_final_only_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RC-05: dictation is final-only by default (STT_DICTATION_PARTIALS_ENABLED unset/false) -
+    the partial decoder never starts even though dictation permits enabling it."""
+    monkeypatch.setattr(settings, "stt_provider", "faster_whisper")
+    monkeypatch.setattr(settings, "stt_fallback_provider", "none")
+    assert settings.stt_dictation_partials_enabled is False
+    service = _BlockingPartialService()
+    runtime.stt_service = service
+    runtime.stt_router = SttProviderRouter(primary=_LocalAdapter())
+    app = FastAPI()
+    app.include_router(stt.router)
+
+    with TestClient(app).websocket_connect("/stt/stream") as socket:
+        socket.send_json(_start(max_duration=1, mode="dictation").model_dump(by_alias=True))
+        assert socket.receive_json()["type"] == "ready"
+        socket.send_bytes(_pcm_frame(1000))
+        socket.send_json({"type": "flush", "reason": "user_stop"})
+        final = socket.receive_json()
+        assert final["type"] == "final"
+        assert not service.decode_started.is_set()
+
+
+def test_hands_free_partials_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RC-05: hands_free is final-only by default, same as dictation, and stays that way unless
+    STT_HANDSFREE_PARTIALS_ENABLED is explicitly set."""
+    monkeypatch.setattr(settings, "stt_provider", "faster_whisper")
+    monkeypatch.setattr(settings, "stt_fallback_provider", "none")
+    assert settings.stt_handsfree_partials_enabled is False
+    service = _BlockingPartialService()
+    runtime.stt_service = service
+    runtime.stt_router = SttProviderRouter(primary=_LocalAdapter())
+    app = FastAPI()
+    app.include_router(stt.router)
+
+    with TestClient(app).websocket_connect("/stt/stream") as socket:
+        socket.send_json(_start(max_duration=1, mode="hands_free").model_dump(by_alias=True))
+        assert socket.receive_json()["type"] == "ready"
+        socket.send_bytes(_pcm_frame(1000))
+        socket.send_json({"type": "flush", "reason": "user_stop"})
+        final = socket.receive_json()
+        assert final["type"] == "final"
+        assert not service.decode_started.is_set()
 
 
 def _options(**changes) -> SttOptions:
@@ -317,13 +416,13 @@ def _options(**changes) -> SttOptions:
     return replace(base, **changes)
 
 
-def _start(max_duration: int) -> SttStartControl:
+def _start(max_duration: int, *, mode: str = "command") -> SttStartControl:
     return SttStartControl(
         type="start",
         protocolVersion="2",
         sessionId="session-1",
         requestId="request-1",
-        mode="command",
+        mode=mode,
         provider="auto",
         audio=SttAudioFormat(
             sampleRate=16_000,

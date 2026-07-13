@@ -294,13 +294,20 @@ async def stt_stream(
                 max_interval_ms=settings.stt_stream_max_partial_interval_ms,
                 rtf_slow_threshold=settings.stt_stream_rtf_slow_threshold,
             )
-            if options.mode != "command":
-                # Command utterances are short and only the final transcript matters - live partial
-                # captions aren't shown for a purpose worth their cost. On CPU-constrained deploys a
-                # slow model's partial decode can outrun real-time by 10-20x; flush() then blocks on
-                # `_settle_decoder()` waiting for that in-flight partial before it can even start the
-                # final decode (setara-s94o: measured 7-12s of pure wait on `small.en`). Not starting
-                # the decoder loop at all for command mode skips that decode - and the wait - entirely.
+            # Command never runs a partial decoder; dictation/hands_free are also final-only by
+            # default (ASA STT accuracy/latency recovery plan, RC-05) - flush() blocks on any
+            # in-flight partial before the final decode can even start (`_settle_decoder` in
+            # stt_stream_scheduler.py), and a slow model can turn that into 7-12s+ of pure wait on
+            # top of the final decode itself. Not starting the decoder loop at all skips that decode
+            # - and the wait - entirely. Live partial captions are opt-in per mode via
+            # STT_DICTATION_PARTIALS_ENABLED/STT_HANDSFREE_PARTIALS_ENABLED for deployments willing
+            # to pay the cost (widen STT_STREAM_INTERVAL_MS/STT_STREAM_MAX_PARTIAL_INTERVAL_MS too).
+            partials_enabled = {
+                "command": False,
+                "dictation": settings.stt_dictation_partials_enabled,
+                "hands_free": settings.stt_handsfree_partials_enabled,
+            }.get(options.mode, False)
+            if partials_enabled:
                 scheduler.start()
             session_mode = options.mode
             metric_session = (_metric_provider(options.provider), options.mode)
