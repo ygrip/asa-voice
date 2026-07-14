@@ -1,0 +1,25 @@
+app/providers/openai_stt.py
+  58e223d88c222854 6,18-32,76
+tests/test_openai_stt_contract.py
+  58e223d88c222854 11,148-191
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.23",
+  "base_commit_sha": "f9d5c8d42c8221123e35ed1e54520d44324cef00",
+  "prompts": {
+    "58e223d88c222854": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6d66f83f-2311-42a9-b1b9-95f07e521e15",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "ygrip <yunaz.gilang@gmail.com>",
+      "messages": [],
+      "total_additions": 66,
+      "total_deletions": 3,
+      "accepted_lines": 64,
+      "overriden_lines": 0
+    }
+  }
+}
