@@ -1,14 +1,16 @@
 """Shared singletons + concurrency gates, initialized at app startup (see main.lifespan)."""
-import asyncio
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from app.config import settings
-from app.providers.faster_whisper import FasterWhisperAdapter
-from app.providers.openai_stt import OpenAiSttAdapter
-from app.providers.pocket_tts import PocketTtsAdapter
 from app.providers.policy import RequestValidationPolicy
 from app.providers.router import SttProviderRouter, TtsProviderRouter
-from app.services.stt_service import SttService
-from app.services.tts_service import TtsService
+from app.services.operation_limiter import OperationLimiter
+
+if TYPE_CHECKING:
+    from app.services.stt_service import SttService
+    from app.services.tts_service import TtsService
 
 # Engine singletons — kept directly for the streaming session (rolling-window WS decode) and the
 # /tts/stream + voice-catalog paths, which sit outside the provider-router abstraction (Phase 1 only
@@ -24,9 +26,37 @@ tts_router: TtsProviderRouter | None = None
 # across requests instead of resetting every time build_routers() runs.
 stt_policy = RequestValidationPolicy()
 
-# One job at a time by default — protects the capped container from OOM/CPU contention.
-stt_semaphore = asyncio.Semaphore(settings.max_concurrent_stt)
-tts_semaphore = asyncio.Semaphore(settings.max_concurrent_tts)
+
+def _build_operation_limiters() -> tuple[OperationLimiter, OperationLimiter, OperationLimiter]:
+    return (
+        OperationLimiter(
+            settings.local_stt_max_concurrent
+            if settings.local_stt_max_concurrent is not None
+            else settings.max_concurrent_stt,
+            busy_code="STT_LOCAL_BUSY",
+            busy_message="Local STT decode is busy - retry shortly",
+        ),
+        OperationLimiter(
+            settings.hosted_stt_max_concurrent,
+            busy_code="STT_HOSTED_BUSY",
+            busy_message="Hosted STT request limit reached - retry shortly",
+        ),
+        OperationLimiter(
+            settings.tts_max_concurrent
+            if settings.tts_max_concurrent is not None
+            else settings.max_concurrent_tts,
+            busy_code="TTS_BUSY",
+            busy_message="TTS synthesis is busy - retry shortly",
+        ),
+    )
+
+
+local_decode_limiter, hosted_request_limiter, tts_limiter = _build_operation_limiters()
+
+
+def reset_operation_limiters() -> None:
+    global local_decode_limiter, hosted_request_limiter, tts_limiter
+    local_decode_limiter, hosted_request_limiter, tts_limiter = _build_operation_limiters()
 
 SUPPORTED_STT_PROVIDERS = {"faster_whisper", "openai"}
 SUPPORTED_STT_FALLBACK_PROVIDERS = {"none", "faster_whisper", "openai"}
@@ -62,12 +92,50 @@ def validate_provider_config() -> None:
         )
 
 
+def needs_local_stt() -> bool:
+    return (
+        settings.stt_provider == "faster_whisper"
+        or settings.stt_fallback_provider == "faster_whisper"
+    )
+
+
+def needs_hosted_stt() -> bool:
+    return settings.stt_provider == "openai" or settings.stt_fallback_provider == "openai"
+
+
+def hosted_stt_config_usable() -> bool:
+    return bool(
+        settings.openai_api_key.strip()
+        and settings.openai_stt_model.strip()
+        and settings.openai_stt_timeout_seconds > 0
+    )
+
+
+def load_local_stt_service() -> SttService:
+    """Import the local engine only when provider selection requires it."""
+    from app.services.stt_service import SttService
+
+    return SttService()
+
+
+def load_tts_service() -> TtsService:
+    from app.services.tts_service import TtsService
+
+    return TtsService()
+
+
 def build_stt_adapter(provider: str, service: SttService | None):
     if provider == "none":
         return None
     if provider == "faster_whisper":
-        return FasterWhisperAdapter(service) if service is not None else None
+        if service is None:
+            return None
+        from app.providers.faster_whisper import FasterWhisperAdapter
+
+        return FasterWhisperAdapter(service)
     if provider == "openai":
+        from app.providers.openai_stt import OpenAiSttAdapter
+
         return OpenAiSttAdapter()
     raise UnsupportedProviderError(f"STT provider {provider!r} has no adapter yet")
 
@@ -76,6 +144,8 @@ def build_tts_adapter(provider: str, service: TtsService | None):
     if provider == "none" or service is None:
         return None
     if provider == "pocket_tts":
+        from app.providers.pocket_tts import PocketTtsAdapter
+
         return PocketTtsAdapter(service)
     raise UnsupportedProviderError(f"TTS provider {provider!r} has no adapter yet")
 
@@ -86,7 +156,9 @@ def build_routers() -> None:
     global stt_router, tts_router
 
     stt_primary = build_stt_adapter(settings.stt_provider, stt_service)
-    stt_fallback_name = settings.stt_fallback_provider if settings.stt_fallback_provider != settings.stt_provider else "none"
+    stt_fallback_name = settings.stt_fallback_provider
+    if stt_fallback_name == settings.stt_provider:
+        stt_fallback_name = "none"
     stt_fallback = build_stt_adapter(stt_fallback_name, stt_service)
     stt_router = (
         SttProviderRouter(primary=stt_primary, fallback=stt_fallback, policy=stt_policy)
@@ -94,7 +166,22 @@ def build_routers() -> None:
     )
 
     tts_primary = build_tts_adapter(settings.tts_provider, tts_service)
-    tts_fallback_name = settings.tts_fallback_provider if settings.tts_fallback_provider != settings.tts_provider else "none"
+    tts_fallback_name = settings.tts_fallback_provider
+    if tts_fallback_name == settings.tts_provider:
+        tts_fallback_name = "none"
     tts_fallback = build_tts_adapter(tts_fallback_name, tts_service)
     tts_router = TtsProviderRouter(primary=tts_primary, fallback=tts_fallback) if tts_primary else None
 
+
+def has_stt_adapter(provider: str) -> bool:
+    return stt_router is not None and stt_router.resolve_provider(provider) is not None
+
+
+def reset_components() -> None:
+    global stt_service, tts_service, stt_router, tts_router
+
+    stt_service = None
+    tts_service = None
+    stt_router = None
+    tts_router = None
+    reset_operation_limiters()

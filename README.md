@@ -150,11 +150,11 @@ implemented; an unrecognized provider name fails the process at startup instead 
 descriptive metadata - provider and fallback variables perform the actual routing. See
 `asa-local-openai-hosted-mode-plan.md` (repo root) and this file's `KNOWLEDGE.md` for the adapter/router pattern.
 
-Provider routing currently covers multipart `POST /stt`. The file-free `POST /stt/raw` path needs an adapter with
-`transcribe_array()`, and the rolling WebSocket path directly uses the Faster Whisper service. Setara Core uses both
-of those paths for its full voice-session flow, so keep `STT_PROVIDER=faster_whisper` for production voice sessions
-until provider-neutral raw and streaming contracts are implemented. OpenAI can be evaluated through `POST /stt` or
-as a file-based fallback without implying that hosted mode covers the complete Core flow.
+Provider routing covers multipart `POST /stt` and provider-owned WebSocket `/stt/stream` sessions. Faster Whisper
+keeps bounded rolling PCM and live partials; OpenAI incrementally writes private temporary WAV audio and uploads it
+only at flush, so it emits a final without synthetic partials. The file-free `POST /stt/raw` path still requires an
+adapter with `transcribe_array()` and therefore remains local. Use the WebSocket path for complete hosted voice
+sessions and reserve `/stt/raw` for local finalization.
 
 ### achetronic/parakeet assessment
 
@@ -362,21 +362,32 @@ extra, or unused settings so Compose and documentation cannot silently retain ob
 | `STT_CPU_THREADS` | `4` | Decode thread count — use all cores for best latency |
 | `STT_PARTIAL_BEAM_SIZE` | `1` | Greedy rolling-partial decode used only for display |
 | `STT_FINAL_BEAM_SIZE` | `3` | Accuracy-oriented final decode used for commands |
-| `STT_FINAL_VAD_FILTER` | `true` | Skip silent regions during final decoding |
+| `STT_FINAL_VAD_FILTER` | `false` | Skip silent regions during final decoding — off by default, Silero VAD isn't tuned for live 16kHz mic PCM and can clip real speech |
 | `STT_STREAM_INTERVAL_MS` | `600` | Rolling-window re-decode interval for `/stt/stream` |
+| `STT_STREAM_HANDSHAKE_TIMEOUT_SECONDS` | `10` | Deadline for receiving a valid stream start control |
+| `STT_STREAM_NO_AUDIO_IDLE_TIMEOUT_SECONDS` | `45` | No-audio idle deadline after the stream becomes ready |
+| `STT_PROVIDER_FINAL_TIMEOUT_SECONDS` | `300` | Hosted provider finalization ceiling; interactive clients use shorter review-safe deadlines |
+| `STT_STREAM_MAX_PARTIAL_INTERVAL_MS` | `2400` | Maximum adaptive partial cadence while decode RTF is above threshold |
+| `STT_STREAM_RTF_SLOW_THRESHOLD` | `1.0` | Partial decode real-time factor that triggers cadence backoff |
 | `STT_STREAM_ENERGY_THRESHOLD` | `0.02` | Skip partial decoding below the RMS speech threshold |
-| `OPENAI_STT_MODEL` | `gpt-4o-mini-transcribe` | Hosted model for multipart `/stt`; does not make raw/WS provider-neutral |
+| `OPENAI_STT_MODEL` | `gpt-4o-mini-transcribe` | Hosted model for multipart and buffered WebSocket STT |
+| `OPENAI_STT_BUFFER_DIRECTORY` | `/tmp/asa-voice/stt` | Dedicated private directory for hosted stream WAV files |
+| `OPENAI_STT_MAX_TEMP_BYTES` | `15728640` | Maximum bytes for one hosted stream temporary WAV |
+| `OPENAI_STT_ORPHAN_TTL_SECONDS` | `3600` | Minimum age before startup removes an owned orphan WAV |
 | `TTS_ENGINE` | `pocket-tts` | TTS backend (only `pocket-tts` currently) |
 | `TTS_DEFAULT_VOICE` | `asa_default` | Voice ID: `asa_default` (anna), `asa_bright` (eve), `asa_calm` (george) |
 | `TTS_DEFAULT_MODEL` | `pocket-low` | Pocket TTS model variant |
 | `TTS_SAMPLE_RATE` | `24000` | Output sample rate (Hz) |
 | `TTS_COMPILE` | `true` | `torch.compile` the model at startup — first call is slow, subsequent calls faster |
 | `TTS_STREAM_COALESCE` | `1` | Chunks to buffer before flushing in `/tts/stream`. `1` = lowest latency |
-| `MAX_AUDIO_SECONDS` | `20` | Rolling WebSocket and raw PCM duration cap |
+| `MAX_AUDIO_SECONDS` | `300` | Safety-net cap, composed via `min()` with the mode's negotiated duration — not the effective per-mode cap |
 | `MAX_UPLOAD_SECONDS` | `300` | Multipart file duration cap |
 | `MAX_UPLOAD_MB` | `15` | Max upload body size before `413` |
-| `MAX_CONCURRENT_STT` | `1` | Max parallel STT requests |
-| `MAX_CONCURRENT_TTS` | `1` | Max parallel TTS requests |
+| `LOCAL_STT_MAX_CONCURRENT` | `1` | Parallel local Faster Whisper decode operations across batch and streaming |
+| `HOSTED_STT_MAX_CONCURRENT` | `4` | Parallel hosted STT upload/request operations across batch and buffered streaming |
+| `TTS_MAX_CONCURRENT` | `1` | Parallel TTS synthesis operations across batch and raw streaming |
+| `MAX_CONCURRENT_STT` | `1` | Legacy fallback for local STT when `LOCAL_STT_MAX_CONCURRENT` is unset |
+| `MAX_CONCURRENT_TTS` | `1` | Legacy fallback for TTS when `TTS_MAX_CONCURRENT` is unset |
 | `TMP_DIR` | `/tmp/asa-voice` | Scratch dir for audio processing |
 
 ---

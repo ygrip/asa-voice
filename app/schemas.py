@@ -53,19 +53,26 @@ class VoiceInfo(BaseModel):
 
 class HealthSttInfo(BaseModel):
     model: str
-    device: str
-    computeType: str
+    device: str | None = None
+    computeType: str | None = None
     artifactReady: bool | None = None
     provider: str
     fallbackProvider: str | None = None
+    fallbackModel: str | None = None
+    localReady: bool
+    hostedReady: bool
+    fallbackReady: bool | None = None
     ready: bool
+    warning: str | None = None
 
 
 class HealthTtsInfo(BaseModel):
     engine: str
+    model: str
     sampleRate: int
     provider: str
     ready: bool
+    warning: str | None = None
 
 
 class HealthResponse(BaseModel):
@@ -87,21 +94,29 @@ class ModelLimits(BaseModel):
 class SttInfo(BaseModel):
     engine: str
     model: str
-    device: str
-    computeType: str
+    device: str | None = None
+    computeType: str | None = None
     activeProvider: str
     activeModel: str
+    activeLoaded: bool
     fallbackProvider: str | None = None
     fallbackModel: str | None = None
+    fallbackLoaded: bool | None = None
+    localLoaded: bool
+    hostedConfigured: bool
     availableProviders: list[str]
+    supportedProviders: list[str]
 
 
 class TtsInfo(BaseModel):
     engine: str
+    activeModel: str
+    loaded: bool
     defaultVoice: str
     voices: list[VoiceInfo]
     activeProvider: str
     availableProviders: list[str]
+    supportedProviders: list[str]
 
 
 class ModelsResponse(BaseModel):

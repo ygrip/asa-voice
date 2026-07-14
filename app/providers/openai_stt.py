@@ -11,6 +11,7 @@ from openai import AsyncOpenAI
 from app.config import settings
 from app.providers.base import SttOptions, SttResult
 from app.providers.errors import SttFailLoudError, SttFallbackEligibleError
+from app.services.operation_limiter import OperationBusyError
 
 
 class OpenAiSttAdapter:
@@ -35,16 +36,21 @@ class OpenAiSttAdapter:
         self.model = settings.openai_stt_model
 
     async def transcribe(self, audio_path: str, options: SttOptions) -> SttResult:
+        from app import runtime
+
         started = time.monotonic()
         prompt = options.prompt or settings.openai_stt_prompt
         try:
-            with open(audio_path, "rb") as audio_file:
-                result = await self.client.audio.transcriptions.create(
-                    model=self.model,
-                    file=audio_file,
-                    language=options.language,
-                    prompt=prompt,
-                )
+            async with runtime.hosted_request_limiter.slot():
+                with open(audio_path, "rb") as audio_file:
+                    result = await self.client.audio.transcriptions.create(
+                        model=self.model,
+                        file=audio_file,
+                        language=options.language,
+                        prompt=prompt,
+                    )
+        except OperationBusyError:
+            raise
         except Exception as exc:  # noqa: BLE001 - reclassified below, never swallowed
             raise classify_openai_stt_error(exc) from exc
 

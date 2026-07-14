@@ -27,17 +27,25 @@ class FasterWhisperAdapter:
         self.service = service
 
     async def transcribe(self, audio_path: str, options: SttOptions) -> SttResult:
+        from app import runtime
+
         context = _context_from_options(options)
         started = time.monotonic()
-        result = await run_in_threadpool(
-            self.service.transcribe, audio_path, options.language, None, context
-        )
+        async with runtime.local_decode_limiter.slot():
+            result = await run_in_threadpool(
+                self.service.transcribe, audio_path, options.language, None, context, options.mode
+            )
         return _to_stt_result(result, started)
 
     async def transcribe_array(self, audio: np.ndarray, options: SttOptions) -> SttResult:
+        from app import runtime
+
         context = _context_from_options(options)
         started = time.monotonic()
-        result = await run_in_threadpool(self.service.transcribe_array_final, audio, context)
+        async with runtime.local_decode_limiter.slot():
+            result = await run_in_threadpool(
+                self.service.transcribe_array_final, audio, context, options.mode
+            )
         return _to_stt_result(result, started)
 
 
