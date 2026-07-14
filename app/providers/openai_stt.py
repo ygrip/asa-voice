@@ -3,6 +3,7 @@ error classification into fallback-eligible vs fail-loud (setara-s94o.7).
 
 Plan reference: asa-local-openai-hosted-mode-plan.md §8 (OpenAI Hosted STT Implementation).
 """
+import re
 import time
 
 import openai
@@ -12,6 +13,23 @@ from app.config import settings
 from app.providers.base import SttOptions, SttResult
 from app.providers.errors import SttFailLoudError, SttFallbackEligibleError
 from app.services.operation_limiter import OperationBusyError
+
+
+def _normalize_for_echo_check(text: str) -> str:
+    collapsed = re.sub(r"[^\w\s]+", " ", text.strip().lower())
+    return re.sub(r"\s+", " ", collapsed).strip()
+
+
+def _is_prompt_echo(text: str, prompt: str) -> bool:
+    """Whisper-family hosted STT (gpt-4o-mini-transcribe included) can hallucinate the injected
+    vocabulary-bias `prompt` back as the transcript on short/quiet/ambiguous audio - a known
+    failure mode, not a real utterance. A one-word "yes" should never coincidentally produce our
+    entire hotwords sentence verbatim."""
+    if not text or not prompt:
+        return False
+    normalized_text = _normalize_for_echo_check(text)
+    normalized_prompt = _normalize_for_echo_check(prompt)
+    return normalized_text == normalized_prompt or normalized_prompt in normalized_text
 
 
 class OpenAiSttAdapter:
@@ -55,10 +73,11 @@ class OpenAiSttAdapter:
             raise classify_openai_stt_error(exc) from exc
 
         latency_ms = int((time.monotonic() - started) * 1000)
+        text = "" if _is_prompt_echo(result.text, prompt) else result.text
         return SttResult(
             provider="openai",
             model=self.model,
-            text=result.text,
+            text=text,
             language=options.language,
             duration_ms=0,
             latency_ms=latency_ms,

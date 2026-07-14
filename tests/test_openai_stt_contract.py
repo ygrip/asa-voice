@@ -8,7 +8,7 @@ import pytest
 
 from app.providers.base import SttOptions
 from app.providers.errors import SttFailLoudError, SttFallbackEligibleError
-from app.providers.openai_stt import OpenAiSttAdapter, classify_openai_stt_error
+from app.providers.openai_stt import OpenAiSttAdapter, classify_openai_stt_error, _is_prompt_echo
 
 _REQUEST = httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
 
@@ -145,3 +145,47 @@ def test_adapter_raises_fail_loud_on_bad_api_key(tmp_path) -> None:
 
     with pytest.raises(SttFailLoudError):
         asyncio.run(adapter.transcribe(str(audio_path), SttOptions(client_id="test")))
+
+
+# --- prompt-echo hallucination guard --------------------------------------------------------
+# gpt-4o-mini-transcribe (and other Whisper-family hosted STT) can hallucinate the injected
+# vocabulary-bias prompt back as the transcript on short/quiet audio - a real report: the user
+# said "yes" and got back the full OPENAI_STT_PROMPT sentence verbatim.
+
+
+def test_is_prompt_echo_detects_verbatim_match() -> None:
+    prompt = "Common product terms: Setara, Raksara, scenario, test case."
+    assert _is_prompt_echo(prompt, prompt) is True
+
+
+def test_is_prompt_echo_ignores_case_and_punctuation() -> None:
+    prompt = "Common product terms: Setara, Raksara."
+    echoed = "common product terms setara raksara"
+    assert _is_prompt_echo(echoed, prompt) is True
+
+
+def test_is_prompt_echo_is_false_for_a_real_short_answer() -> None:
+    prompt = "Common product terms: Setara, Raksara, scenario, test case."
+    assert _is_prompt_echo("yes", prompt) is False
+
+
+def test_adapter_blanks_out_a_hallucinated_prompt_echo(tmp_path) -> None:
+    from app.config import settings
+
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFFfake")
+    adapter = OpenAiSttAdapter(client=_fake_client(text=settings.openai_stt_prompt))
+
+    result = asyncio.run(adapter.transcribe(str(audio_path), SttOptions(client_id="test")))
+
+    assert result.text == ""
+
+
+def test_adapter_keeps_a_real_transcript_that_happens_to_share_a_word(tmp_path) -> None:
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(b"RIFFfake")
+    adapter = OpenAiSttAdapter(client=_fake_client(text="show me the scenario coverage"))
+
+    result = asyncio.run(adapter.transcribe(str(audio_path), SttOptions(client_id="test")))
+
+    assert result.text == "show me the scenario coverage"
