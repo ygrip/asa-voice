@@ -20,6 +20,7 @@ class SttOptions:
     hotwords: Optional[List[str]] = None
     request_id: Optional[str] = None
     client_id: Optional[str] = None
+    mode: str = "command"
 
 
 @dataclass

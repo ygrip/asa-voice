@@ -29,7 +29,12 @@ class TtsService:
     playback. First startup downloads the model from HuggingFace (cached in /root/.cache)."""
 
     def __init__(self):
-        from pocket_tts import TTSModel  # imported here so module import stays cheap/testable
+        import torch  # imported here so module import stays cheap/testable
+        from pocket_tts import TTSModel
+
+        # torch defaults its intraop thread pool to the host's CPU count, not the container's cgroup
+        # limit - left unpinned this oversubscribes the capped container and throttles every matmul.
+        torch.set_num_threads(settings.tts_cpu_threads)
         self.model = TTSModel.load_model(lsd_decode_steps=settings.tts_lsd_decode_steps)
         self._refs = {v["id"]: v["voiceRef"] for v in VOICE_CATALOG}
         self._states: dict[str, object] = {}

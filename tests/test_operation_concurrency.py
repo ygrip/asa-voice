@@ -28,7 +28,7 @@ class _BlockingLocalService:
         self.started = threading.Event()
         self.release = threading.Event()
 
-    def transcribe(self, _path, _language, _vad, _context):
+    def transcribe(self, _path, _language, _vad, _context, _mode="command"):
         self.started.set()
         self.release.wait(timeout=2)
         return {

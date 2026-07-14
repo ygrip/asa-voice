@@ -1,0 +1,47 @@
+{
+  "_comment": "Stage 0 proof-of-concept corpus (asa-moonshine-migration-plan). English-only pilot scope per epic setara-ri76 decision — Moonshine has no Indonesian model, so Indonesian/code-switch phrases from the original plan are dropped, not benchmarked. All audio is synthesized TTS (macOS `say` for command phrases, Pocket-TTS asa_default voice reused from setara-core for assistant cues) — this is a clean-speech sanity/regression corpus, NOT a substitute for the plan's real-mic noise matrix (fan noise, keyboard noise, far mic, Android mic, Bluetooth headset). Those require real recordings supplied separately before the Stage 0 pass gate can be fully signed off.",
+  "fixtures": [
+    {
+      "file": "create_release_plan.wav",
+      "expected": "create a release plan for Raksara",
+      "condition": "synthetic_tts_clean",
+      "entities": ["Raksara"]
+    },
+    {
+      "file": "show_automation_coverage.wav",
+      "expected": "show automation coverage for Setara",
+      "condition": "synthetic_tts_clean",
+      "entities": ["Setara"]
+    },
+    {
+      "file": "rerun_failed_scenarios.wav",
+      "expected": "rerun failed scenarios from build one point zero point one",
+      "condition": "synthetic_tts_clean",
+      "entities": []
+    },
+    {
+      "file": "asa-cues/listening.wav",
+      "expected": "Yes?",
+      "condition": "asa_voice_cue",
+      "entities": []
+    },
+    {
+      "file": "asa-cues/processing.wav",
+      "expected": "Okay, working on it.",
+      "condition": "asa_voice_cue",
+      "entities": []
+    },
+    {
+      "file": "asa-cues/ok.wav",
+      "expected": "Done.",
+      "condition": "asa_voice_cue",
+      "entities": []
+    },
+    {
+      "file": "asa-cues/sorry.wav",
+      "expected": "Sorry, I didn't catch that.",
+      "condition": "asa_voice_cue",
+      "entities": []
+    }
+  ]
+}

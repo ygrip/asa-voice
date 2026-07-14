@@ -69,21 +69,23 @@ class SttService:
         language: str | None = None,
         vad: bool | None = None,
         context: SttDecodeContext | None = None,
+        mode: str = "command",
     ) -> dict:
+        profile = profile_for_mode(mode)
         try:
             segments, info = self.model.transcribe(
                 path,
                 language=resolve_language(context, language),
-                vad_filter=settings.stt_final_vad_filter if vad is None else vad,
+                vad_filter=profile.vad_filter if vad is None else vad,
                 vad_parameters={"min_silence_duration_ms": settings.stt_vad_min_silence_ms},
-                beam_size=settings.stt_final_beam_size,
-                best_of=settings.stt_final_best_of,
-                temperature=settings.stt_temperatures,
+                beam_size=profile.beam_size,
+                best_of=profile.best_of,
+                temperature=profile.temperatures,
                 repetition_penalty=settings.stt_repetition_penalty,
                 no_repeat_ngram_size=settings.stt_no_repeat_ngram_size,
                 compression_ratio_threshold=settings.stt_compression_ratio_threshold,
                 log_prob_threshold=settings.stt_log_prob_threshold,
-                condition_on_previous_text=settings.stt_final_condition_on_previous,
+                condition_on_previous_text=profile.condition_on_previous,
                 no_speech_threshold=settings.stt_no_speech_threshold,
                 # No initial_prompt: on gapped/multi-region (VAD-collected) audio it makes Whisper
                 # terminate after the first segment, truncating long utterances. hotwords give the

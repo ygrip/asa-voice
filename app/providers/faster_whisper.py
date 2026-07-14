@@ -33,7 +33,7 @@ class FasterWhisperAdapter:
         started = time.monotonic()
         async with runtime.local_decode_limiter.slot():
             result = await run_in_threadpool(
-                self.service.transcribe, audio_path, options.language, None, context
+                self.service.transcribe, audio_path, options.language, None, context, options.mode
             )
         return _to_stt_result(result, started)
 
@@ -43,7 +43,9 @@ class FasterWhisperAdapter:
         context = _context_from_options(options)
         started = time.monotonic()
         async with runtime.local_decode_limiter.slot():
-            result = await run_in_threadpool(self.service.transcribe_array_final, audio, context)
+            result = await run_in_threadpool(
+                self.service.transcribe_array_final, audio, context, options.mode
+            )
         return _to_stt_result(result, started)
 
 

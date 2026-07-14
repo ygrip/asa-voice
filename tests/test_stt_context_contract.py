@@ -18,10 +18,11 @@ def test_partial_and_final_profiles_are_independent() -> None:
     service = (ROOT / "app" / "services" / "stt_service.py").read_text()
 
     assert "stt_partial_beam_size" in config
-    assert "stt_final_beam_size" in config
+    assert "stt_command_beam_size" in config
     assert "beam_size=settings.stt_partial_beam_size" in service
-    assert "beam_size=settings.stt_final_beam_size" in service
+    assert "beam_size=profile.beam_size" in service
     assert "def transcribe_array_final(" in service
+    assert "def profile_for_mode(" in service
 
 
 def test_stream_supports_structured_control_messages() -> None:

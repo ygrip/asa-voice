@@ -32,18 +32,11 @@ class Settings(BaseSettings):
     stt_partial_best_of: int = 1
     stt_partial_word_timestamps: bool = True
     stt_partial_vad_filter: bool = False
-    # Final decode is the command-execution transcript and favors accuracy.
-    stt_final_beam_size: int = 3
-    stt_final_best_of: int = 3
+    # Final decode is the command-execution transcript and favors accuracy. beam_size/best_of/
+    # vad_filter/condition_on_previous/temperatures are mode-specific (profile_for_mode in
+    # stt_service.py, settings below) - only word_timestamps stays a single global final-decode
+    # knob since no mode currently needs it toggled independently.
     stt_final_word_timestamps: bool = False
-    # False to match partial (stt_partial_vad_filter) - Silero VAD ran pre-decode on final only,
-    # with its threshold/speech_pad_ms never tuned for live 16kHz mic PCM (only validated against
-    # clean uploaded WAVs), and could trim a real, partial-confirmed utterance to near-nothing
-    # before Whisper ever saw it (setara-s94o STT quality incident: partials showed real text, the
-    # final came back empty). no_speech_threshold below already gates non-speech segments
-    # post-decode, uniformly for both partial and final - keep silence handling to that one place.
-    stt_final_vad_filter: bool = False
-    stt_final_condition_on_previous: bool = False
     # Decode-quality knobs: drop silence/hallucinations, don't carry context between clips (faster,
     # avoids the model "completing" a previous sentence into the next short command).
     stt_no_speech_threshold: float = 0.6
@@ -61,7 +54,6 @@ class Settings(BaseSettings):
     stt_no_repeat_ngram_size: int = 0
     stt_compression_ratio_threshold: float = 2.4
     stt_log_prob_threshold: float = -1.0
-    stt_temperatures: tuple[float, ...] = (0.0, 0.2, 0.4)
     # Bias decoding toward the assistant name and domain vocabulary so "ASA" isn't heard as "Elsa",
     # "Setara" as "set are", etc. initial_prompt seeds context; hotwords boosts these tokens.
     stt_hotwords: str = "ASA Setara"
@@ -167,6 +159,16 @@ class Settings(BaseSettings):
     # Stream chunk pacing: number of generate_audio_stream chunks to coalesce before flushing to the
     # client. 1 = lowest latency, more frames; higher = fewer/bigger frames.
     tts_stream_coalesce: int = 1
+    # torch's own thread pool defaults to the HOST's visible CPU count, not the container's cgroup
+    # cpu limit - inside a cpus-capped container that's oversubscription (torch spawns more compute
+    # threads than the cgroup has quota for), which throttles every matmul and is a direct cause of
+    # slow/stuttery synthesis under load. Pin explicitly. STT (ctranslate2, own separate thread pool)
+    # and TTS rarely compute at the same instant within one voice turn (transcribe THEN synthesize),
+    # so this matches stt_cpu_threads rather than splitting the container's budget in half - a
+    # lower value starves single-request matmul throughput for an isolation benefit that's mostly
+    # theoretical (brief overlap across two concurrent requests tolerates some oversubscription far
+    # better than either side being starved on every request).
+    tts_cpu_threads: int = 4
 
     # Auth: comma-separated "client_id:secret" pairs (same format as asa-rust-voice).
     # Empty = open / dev mode (no key required).

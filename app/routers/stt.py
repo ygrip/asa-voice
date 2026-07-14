@@ -52,6 +52,7 @@ def _options_from_context(
     client_id: str,
     request_id: str | None,
     language: str | None = None,
+    mode: str = "command",
 ) -> SttOptions:
     return SttOptions(
         language=language or (context.language if context else None),
@@ -59,6 +60,7 @@ def _options_from_context(
         hotwords=context.hotwords if context else None,
         request_id=request_id or (context.request_id if context else None) or str(uuid.uuid4()),
         client_id=client_id,
+        mode=mode,
     )
 
 
@@ -151,6 +153,7 @@ async def stt(
     language: str | None = Form(default=None),
     context: str | None = Form(default=None),
     provider: str | None = Form(default=None),
+    mode: str = Form(default="command"),
     x_request_id: str | None = Header(default=None),
     _client_id: str = Depends(require_api_key),
 ) -> SttResponse:
@@ -186,7 +189,7 @@ async def stt(
             pass
         raise HTTPException(status_code=400, detail="Invalid STT context") from exc
 
-    options = _options_from_context(decode_context, _client_id, x_request_id, language)
+    options = _options_from_context(decode_context, _client_id, x_request_id, language, mode)
     provider_override = _resolve_provider_override(provider, _client_id)
     try:
         result = await runtime.stt_router.transcribe(
