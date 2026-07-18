@@ -15,7 +15,7 @@ from app.providers.base import SttOptions, TtsOptions
 from app.providers.faster_whisper import FasterWhisperAdapter
 from app.providers.openai_stt import OpenAiSttAdapter
 from app.providers.pocket_tts import PocketTtsAdapter
-from app.providers.router import SttProviderRouter
+from app.providers.router import SttProviderRouter, TtsProviderRouter
 from app.providers.streaming.base import SttOptions as StreamSttOptions, SttStreamState
 from app.providers.streaming.openai_buffered_session import OpenAiBufferedFileSession
 from app.services.operation_limiter import OperationBusyError, OperationLimiter
@@ -364,8 +364,10 @@ def test_hosted_buffered_streams_share_adapter_limit_without_a_second_gate(
 
 def test_tts_raw_stream_uses_shared_limit_and_rejects_before_headers() -> None:
     async def exercise() -> None:
-        original_service = runtime.tts_service
-        runtime.tts_service = _SingleFrameStreamingTtsService()
+        original_router = runtime.tts_router
+        runtime.tts_router = TtsProviderRouter(
+            primary=PocketTtsAdapter(_SingleFrameStreamingTtsService())
+        )
         runtime.tts_limiter = OperationLimiter(
             1, busy_code="TTS_BUSY", busy_message="tts busy"
         )
@@ -392,7 +394,7 @@ def test_tts_raw_stream_uses_shared_limit_and_rejects_before_headers() -> None:
             await response.background()
             assert runtime.tts_limiter.active == 0
         finally:
-            runtime.tts_service = original_service
+            runtime.tts_router = original_router
 
     asyncio.run(exercise())
     runtime.reset_operation_limiters()
@@ -400,8 +402,10 @@ def test_tts_raw_stream_uses_shared_limit_and_rejects_before_headers() -> None:
 
 def test_tts_raw_stream_background_releases_abandoned_response() -> None:
     async def exercise() -> None:
-        original_service = runtime.tts_service
-        runtime.tts_service = _SingleFrameStreamingTtsService()
+        original_router = runtime.tts_router
+        runtime.tts_router = TtsProviderRouter(
+            primary=PocketTtsAdapter(_SingleFrameStreamingTtsService())
+        )
         runtime.tts_limiter = OperationLimiter(
             1, busy_code="TTS_BUSY", busy_message="tts busy"
         )
@@ -415,7 +419,7 @@ def test_tts_raw_stream_background_releases_abandoned_response() -> None:
             await response.body_iterator.aclose()
             assert runtime.tts_limiter.active == 0
         finally:
-            runtime.tts_service = original_service
+            runtime.tts_router = original_router
 
     asyncio.run(exercise())
     runtime.reset_operation_limiters()
@@ -423,8 +427,10 @@ def test_tts_raw_stream_background_releases_abandoned_response() -> None:
 
 def test_tts_raw_stream_aclose_after_partial_iteration_releases_once() -> None:
     async def exercise() -> None:
-        original_service = runtime.tts_service
-        runtime.tts_service = _TwoFrameStreamingTtsService()
+        original_router = runtime.tts_router
+        runtime.tts_router = TtsProviderRouter(
+            primary=PocketTtsAdapter(_TwoFrameStreamingTtsService())
+        )
         runtime.tts_limiter = OperationLimiter(
             1, busy_code="TTS_BUSY", busy_message="tts busy"
         )
@@ -439,7 +445,7 @@ def test_tts_raw_stream_aclose_after_partial_iteration_releases_once() -> None:
             await response.background()
             assert runtime.tts_limiter.active == 0
         finally:
-            runtime.tts_service = original_service
+            runtime.tts_router = original_router
 
     asyncio.run(exercise())
     runtime.reset_operation_limiters()
@@ -447,9 +453,13 @@ def test_tts_raw_stream_aclose_after_partial_iteration_releases_once() -> None:
 
 def test_tts_raw_stream_construction_failure_releases_lease() -> None:
     async def exercise() -> None:
-        original_service = runtime.tts_service
-        runtime.tts_service = SimpleNamespace(
-            model=SimpleNamespace(), synthesize_stream=lambda *_args: iter(())
+        original_router = runtime.tts_router
+        runtime.tts_router = TtsProviderRouter(
+            primary=PocketTtsAdapter(
+                SimpleNamespace(
+                    model=SimpleNamespace(), synthesize_stream=lambda *_args: iter(())
+                )
+            )
         )
         runtime.tts_limiter = OperationLimiter(
             1, busy_code="TTS_BUSY", busy_message="tts busy"
@@ -461,7 +471,7 @@ def test_tts_raw_stream_construction_failure_releases_lease() -> None:
                 )
             assert runtime.tts_limiter.active == 0
         finally:
-            runtime.tts_service = original_service
+            runtime.tts_router = original_router
 
     asyncio.run(exercise())
     runtime.reset_operation_limiters()
@@ -469,9 +479,9 @@ def test_tts_raw_stream_construction_failure_releases_lease() -> None:
 
 def test_tts_raw_stream_cancellation_waits_for_worker_before_releasing() -> None:
     async def exercise() -> None:
-        original_service = runtime.tts_service
+        original_router = runtime.tts_router
         service = _BlockingStreamingTtsService()
-        runtime.tts_service = service
+        runtime.tts_router = TtsProviderRouter(primary=PocketTtsAdapter(service))
         runtime.tts_limiter = OperationLimiter(
             1, busy_code="TTS_BUSY", busy_message="tts busy"
         )
@@ -499,7 +509,7 @@ def test_tts_raw_stream_cancellation_waits_for_worker_before_releasing() -> None
             assert runtime.tts_limiter.active == 0
         finally:
             service.release.set()
-            runtime.tts_service = original_service
+            runtime.tts_router = original_router
 
     asyncio.run(exercise())
     runtime.reset_operation_limiters()

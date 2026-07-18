@@ -8,7 +8,9 @@ import asyncio
 
 import pytest
 
-from app.providers.base import SttOptions, SttResult, TtsOptions, TtsResult
+from app.providers.base import (
+    SttOptions, SttResult, TtsAudioMetadata, TtsOptions, TtsResult, TtsStreamResult,
+)
 from app.providers.errors import SttFallbackEligibleError
 from app.providers.router import SttProviderRouter, TtsProviderRouter
 
@@ -131,3 +133,74 @@ def test_tts_router_raises_primary_error_when_fallback_is_none() -> None:
 
     with pytest.raises(RuntimeError, match="primary failed"):
         asyncio.run(router.synthesize("hello", TtsOptions()))
+
+
+def _metadata() -> TtsAudioMetadata:
+    return TtsAudioMetadata(
+        content_type="audio/l16", sample_rate=24_000, channels=1,
+        sample_format="s16le", response_format="pcm",
+    )
+
+
+class _FakeStreamingTtsAdapter:
+    """provider_name identifies which adapter actually produced a given TtsStreamResult, so tests
+    can assert whether the router did or didn't fall back."""
+
+    def __init__(self, provider_name: str, chunks: list[bytes] | None = None, fail_before_first: bool = False):
+        self.provider_name = provider_name
+        self._chunks = chunks or []
+        self._fail_before_first = fail_before_first
+
+    async def synthesize_stream(self, text, options) -> TtsStreamResult:
+        if self._fail_before_first:
+            raise RuntimeError(f"{self.provider_name} unavailable")
+
+        async def _gen():
+            for chunk in self._chunks:
+                yield chunk
+
+        return TtsStreamResult(
+            provider=self.provider_name, model="test", voice_id=options.voice_id,
+            metadata=_metadata(), chunks=_gen(),
+        )
+
+
+def test_tts_router_stream_falls_back_before_first_chunk() -> None:
+    async def exercise() -> None:
+        primary = _FakeStreamingTtsAdapter("openai", fail_before_first=True)
+        fallback = _FakeStreamingTtsAdapter("pocket_tts", chunks=[b"a", b"b"])
+        router = TtsProviderRouter(primary=primary, fallback=fallback)
+
+        stream = await router.synthesize_stream("hello", TtsOptions())
+
+        assert stream.provider == "pocket_tts"
+        assert [chunk async for chunk in stream.chunks] == [b"a", b"b"]
+
+    asyncio.run(exercise())
+
+
+def test_tts_router_stream_never_switches_provider_after_first_chunk() -> None:
+    class _FailsAfterFirstChunk:
+        provider_name = "openai"
+
+        async def synthesize_stream(self, text, options) -> TtsStreamResult:
+            async def _gen():
+                yield b"a"
+                raise RuntimeError("openai dropped mid-stream")
+
+            return TtsStreamResult(
+                provider="openai", model="test", voice_id=options.voice_id,
+                metadata=_metadata(), chunks=_gen(),
+            )
+
+    async def exercise() -> None:
+        fallback = _FakeStreamingTtsAdapter("pocket_tts", chunks=[b"x"])
+        router = TtsProviderRouter(primary=_FailsAfterFirstChunk(), fallback=fallback)
+
+        stream = await router.synthesize_stream("hello", TtsOptions())
+        assert stream.provider == "openai"
+
+        with pytest.raises(RuntimeError, match="openai dropped mid-stream"):
+            _ = [chunk async for chunk in stream.chunks]
+
+    asyncio.run(exercise())
