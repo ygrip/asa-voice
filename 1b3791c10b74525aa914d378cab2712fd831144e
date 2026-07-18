@@ -1,0 +1,33 @@
+app/providers/pocket_tts.py
+  3e1b7f987a536b8e 9,15,17,19,45-73,75-90
+app/providers/base.py
+  3e1b7f987a536b8e 9,56-58,70-87,89-90,92-95
+app/routers/tts.py
+  3e1b7f987a536b8e 56,65,67,70-71,73-86
+tests/test_provider_router_contract.py
+  3e1b7f987a536b8e 11-13,136-206
+tests/test_operation_concurrency.py
+  3e1b7f987a536b8e 18,367-370,397,405-408,422,430-433,448,456-462,474,482,484,512
+app/providers/router.py
+  3e1b7f987a536b8e 8,14,129-132,134-135,146-204
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.23",
+  "base_commit_sha": "1b3791c10b74525aa914d378cab2712fd831144e",
+  "prompts": {
+    "3e1b7f987a536b8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1cf910cc-4b39-446a-bba7-762faa923a03",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "ygrip <yunaz.gilang@gmail.com>",
+      "messages": [],
+      "total_additions": 309,
+      "total_deletions": 113,
+      "accepted_lines": 269,
+      "overriden_lines": 0
+    }
+  }
+}
