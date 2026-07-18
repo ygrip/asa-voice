@@ -1,0 +1,25 @@
+tests/test_generate_cues_contract.py
+  3e1b7f987a536b8e 1-217
+scripts/generate_cues.py
+  3e1b7f987a536b8e 1-216
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.23",
+  "base_commit_sha": "6c45077ac790c8a237147666885527e5eda14af4",
+  "prompts": {
+    "3e1b7f987a536b8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1cf910cc-4b39-446a-bba7-762faa923a03",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "ygrip <yunaz.gilang@gmail.com>",
+      "messages": [],
+      "total_additions": 434,
+      "total_deletions": 1,
+      "accepted_lines": 433,
+      "overriden_lines": 0
+    }
+  }
+}
