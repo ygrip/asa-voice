@@ -1,0 +1,35 @@
+requirements-hosted.txt
+  3e1b7f987a536b8e 1-4
+requirements-base.txt
+  3e1b7f987a536b8e 1-13
+.github/workflows/ci.yml
+  3e1b7f987a536b8e 35-115
+app/services/tts_service.py
+  3e1b7f987a536b8e 67-68
+requirements-local-tts.txt
+  3e1b7f987a536b8e 1-5
+requirements-local-stt.txt
+  3e1b7f987a536b8e 1-4
+.github/workflows/docker-publish.yml
+  3e1b7f987a536b8e 13-16,18-20,25-93,96,99-131,133-142,146-173,175-180,182,189-191,193-195,197-201,203-220,222-236,241,243-246
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.23",
+  "base_commit_sha": "df4616aa6d0e8ed00e1264e97088f87d1de156b7",
+  "prompts": {
+    "3e1b7f987a536b8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1cf910cc-4b39-446a-bba7-762faa923a03",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "ygrip <yunaz.gilang@gmail.com>",
+      "messages": [],
+      "total_additions": 318,
+      "total_deletions": 19,
+      "accepted_lines": 318,
+      "overriden_lines": 0
+    }
+  }
+}
