@@ -71,6 +71,21 @@ def compute_fingerprint(
     return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
 
 
+# Some encoders (observed with OpenAI's TTS wav output) write a streaming placeholder - e.g.
+# 0xFFFFFFFF - into the RIFF data-chunk size field instead of the true byte length. wave.getnframes()
+# blindly trusts that field, which for mono 16-bit audio computes to exactly 2**31-1 frames (~24
+# days). Recompute the real frame count from bytes actually readable in the file instead.
+_MAX_SANE_FRAMES = 48_000 * 60 * 5  # 5 minutes at 48kHz - far beyond any legitimate cue clip
+
+
+def _actual_frame_count(clip: wave.Wave_read, declared_frame_count: int, channels: int, sample_width: int) -> int:
+    frame_size = channels * sample_width
+    if frame_size == 0 or declared_frame_count == 0:
+        return 0
+    capped = min(declared_frame_count, _MAX_SANE_FRAMES)
+    return len(clip.readframes(capped)) // frame_size
+
+
 def validate_wav_file(path: Path, max_duration_ms: int) -> list[str]:
     """Plan §10.5: every required cue must exist, be non-empty, parse as WAV, be mono, use an
     allowed sample rate, use 16-bit PCM, and stay within its duration bound."""
@@ -81,7 +96,7 @@ def validate_wav_file(path: Path, max_duration_ms: int) -> list[str]:
             channels = clip.getnchannels()
             rate = clip.getframerate()
             sample_width = clip.getsampwidth()
-            frame_count = clip.getnframes()
+            frame_count = _actual_frame_count(clip, clip.getnframes(), channels, sample_width)
     except (wave.Error, EOFError, OSError) as exc:
         return [f"{path}: not a valid WAV file ({exc})"]
 
@@ -138,7 +153,9 @@ async def generate(
             with wave.open(str(clip_path), "rb") as clip:
                 sample_rate = clip.getframerate()
                 channels = clip.getnchannels()
-                duration_ms = (clip.getnframes() / sample_rate) * 1000 if sample_rate else 0
+                sample_width = clip.getsampwidth()
+                frame_count = _actual_frame_count(clip, clip.getnframes(), channels, sample_width)
+                duration_ms = (frame_count / sample_rate) * 1000 if sample_rate else 0
 
             files[f"{entry.id}/{cue_id}.{output_format}"] = {
                 "providerVoice": voice_refs[entry.id],
