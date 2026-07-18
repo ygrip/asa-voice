@@ -1,6 +1,7 @@
 """Unit tests for the /cues, /cues/{voice}/{cue}, and /internal/cues/regenerate endpoints
 (setara-nx07.3, plan §9.2)."""
 import asyncio
+import json
 
 import pytest
 from fastapi import HTTPException
@@ -53,6 +54,9 @@ def test_cue_clip_returns_audio_with_headers(tmp_path) -> None:
     cache_dir = tmp_path / "cache" / "asa_default"
     cache_dir.mkdir(parents=True)
     (cache_dir / "listening.wav").write_bytes(b"RIFFcached")
+    (cache_dir / "listening.json").write_text(
+        json.dumps({"provider": settings.tts_provider, "model": settings.tts_default_model})
+    )
 
     response = asyncio.run(
         cues_router.cue_clip("asa_default", "listening", _client_id="test")

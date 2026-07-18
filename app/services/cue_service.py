@@ -109,17 +109,36 @@ class CueService:
         )
 
     def _load_disk_cache(self, voice_id: str, cue_id: str) -> CueClip | None:
-        clip_path = Path(settings.cue_runtime_cache_dir) / voice_id / f"{cue_id}.wav"
+        cache_dir = Path(settings.cue_runtime_cache_dir) / voice_id
+        clip_path = cache_dir / f"{cue_id}.wav"
         if not clip_path.is_file():
             return None
+
+        # A clip cached under a since-changed TTS_PROVIDER/model must not be served forever just
+        # because the volume persisted across a config change (setara-e93g) - validate it the same
+        # way the embedded pack tier does, falling through to regeneration/unavailable on mismatch
+        # instead of silently serving audio from the wrong provider. A missing manifest (clip
+        # cached before this check existed) counts as unverifiable, not a pass.
+        manifest = _read_json_or_none(cache_dir / f"{cue_id}.json")
+        if settings.cue_pack_strict_match:
+            matches = manifest is not None and _pack_matches_active_config(manifest)
+            if not matches and settings.cue_pack_mismatch_policy != "ignore":
+                log.warning(
+                    "Runtime cue cache for %s/%s does not match active TTS config (policy=%s) - "
+                    "treating as stale",
+                    voice_id, cue_id, settings.cue_pack_mismatch_policy,
+                )
+                return None
+
         audio_bytes = clip_path.read_bytes()
+        manifest = manifest or {}
         return CueClip(
             audio_bytes=audio_bytes,
             content_type="audio/wav",
             etag=_sha256_hex(audio_bytes),
-            cue_pack_fingerprint="runtime-cache",
-            tts_provider=settings.tts_provider,
-            tts_model="",
+            cue_pack_fingerprint=str(manifest.get("fingerprint", "runtime-cache")),
+            tts_provider=str(manifest.get("provider", settings.tts_provider)),
+            tts_model=str(manifest.get("model", _active_tts_model())),
         )
 
     async def _maybe_regenerate(self, voice_id: str, cue_id: str) -> CueClip | None:
@@ -150,7 +169,7 @@ class CueService:
             except OSError:
                 pass
 
-        self._write_disk_cache(voice_id, cue_id, audio_bytes)
+        self._write_disk_cache(voice_id, cue_id, audio_bytes, provider=result.provider, model=result.model)
         clip = CueClip(
             audio_bytes=audio_bytes,
             content_type="audio/wav",
@@ -162,13 +181,25 @@ class CueService:
         self._memory_cache[(voice_id, cue_id)] = clip
         return clip
 
-    def _write_disk_cache(self, voice_id: str, cue_id: str, audio_bytes: bytes) -> None:
+    def _write_disk_cache(self, voice_id: str, cue_id: str, audio_bytes: bytes, *, provider: str, model: str) -> None:
         cache_dir = Path(settings.cue_runtime_cache_dir) / voice_id
         try:
             cache_dir.mkdir(parents=True, exist_ok=True)
             (cache_dir / f"{cue_id}.wav").write_bytes(audio_bytes)
+            # Sidecar manifest so _load_disk_cache() can detect a stale clip after the active TTS
+            # provider/model changes (setara-e93g) instead of serving it forever.
+            (cache_dir / f"{cue_id}.json").write_text(json.dumps({"provider": provider, "model": model}))
         except OSError:
             log.warning("Could not write runtime cue cache for %s/%s", voice_id, cue_id)
+
+
+def _read_json_or_none(path: Path) -> dict | None:
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
 
 
 def _pack_matches_active_config(manifest: dict) -> bool:

@@ -69,10 +69,16 @@ def test_get_cue_raises_503_when_nothing_available_and_regeneration_disabled() -
     assert exc.value.status_code == 503
 
 
+def _write_cache_manifest(cache_dir: Path, cue_id: str, provider=None, model=None) -> None:
+    manifest = {"provider": provider or settings.tts_provider, "model": model or settings.tts_default_model}
+    (cache_dir / f"{cue_id}.json").write_text(json.dumps(manifest))
+
+
 def test_get_cue_serves_from_disk_cache() -> None:
     cache_dir = Path(settings.cue_runtime_cache_dir) / "asa_default"
     cache_dir.mkdir(parents=True)
     (cache_dir / "listening.wav").write_bytes(b"RIFFcached")
+    _write_cache_manifest(cache_dir, "listening")
 
     service = CueService()
     clip = asyncio.run(service.get_cue("asa_default", "listening"))
@@ -86,6 +92,7 @@ def test_get_cue_caches_result_in_memory_after_first_lookup() -> None:
     cache_dir = Path(settings.cue_runtime_cache_dir) / "asa_default"
     cache_dir.mkdir(parents=True)
     (cache_dir / "listening.wav").write_bytes(b"RIFFcached")
+    _write_cache_manifest(cache_dir, "listening")
 
     service = CueService()
     first = asyncio.run(service.get_cue("asa_default", "listening"))
@@ -110,6 +117,68 @@ def test_get_cue_regenerates_when_enabled_and_writes_disk_cache(monkeypatch) -> 
     assert fake_router.calls == 1
     cached_path = Path(settings.cue_runtime_cache_dir) / "asa_default" / "listening.wav"
     assert cached_path.read_bytes() == b"RIFFgenerated"
+
+
+def test_disk_cache_writes_a_manifest_that_matches_the_generating_provider(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "cue_runtime_regeneration", True)
+    runtime.tts_router = _FakeTtsRouter(audio_bytes=b"RIFFgenerated", provider="openai", model="tts-1")
+
+    service = CueService()
+    asyncio.run(service.get_cue("asa_default", "listening"))
+
+    manifest_path = Path(settings.cue_runtime_cache_dir) / "asa_default" / "listening.json"
+    assert json.loads(manifest_path.read_text()) == {"provider": "openai", "model": "tts-1"}
+
+
+def test_disk_cache_is_rejected_as_stale_when_the_provider_has_since_changed() -> None:
+    cache_dir = Path(settings.cue_runtime_cache_dir) / "asa_default"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "listening.wav").write_bytes(b"RIFFstale")
+    _write_cache_manifest(cache_dir, "listening", provider="openai", model="tts-1")
+    # settings.tts_provider defaults to pocket_tts/pocket-low - the manifest above claims openai.
+
+    service = CueService()
+    with pytest.raises(CueUnavailableError) as exc:
+        asyncio.run(service.get_cue("asa_default", "listening"))
+    assert exc.value.status_code == 503
+
+
+def test_disk_cache_without_a_manifest_is_treated_as_unverifiable() -> None:
+    """A clip cached before this manifest existed has no way to prove its provider - must not be
+    trusted forever just because it predates the check (setara-e93g)."""
+    cache_dir = Path(settings.cue_runtime_cache_dir) / "asa_default"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "listening.wav").write_bytes(b"RIFFlegacy")
+
+    service = CueService()
+    with pytest.raises(CueUnavailableError):
+        asyncio.run(service.get_cue("asa_default", "listening"))
+
+
+def test_disk_cache_mismatch_served_anyway_under_ignore_policy(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "cue_pack_mismatch_policy", "ignore")
+    cache_dir = Path(settings.cue_runtime_cache_dir) / "asa_default"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "listening.wav").write_bytes(b"RIFFstale")
+    _write_cache_manifest(cache_dir, "listening", provider="openai", model="tts-1")
+
+    service = CueService()
+    clip = asyncio.run(service.get_cue("asa_default", "listening"))
+
+    assert clip.audio_bytes == b"RIFFstale"
+
+
+def test_disk_cache_mismatch_ignored_when_strict_match_is_disabled(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "cue_pack_strict_match", False)
+    cache_dir = Path(settings.cue_runtime_cache_dir) / "asa_default"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "listening.wav").write_bytes(b"RIFFlegacy")
+    # No manifest at all - strict_match=False should trust it without one.
+
+    service = CueService()
+    clip = asyncio.run(service.get_cue("asa_default", "listening"))
+
+    assert clip.audio_bytes == b"RIFFlegacy"
 
 
 def test_get_cue_raises_503_when_regeneration_enabled_but_no_tts_router(monkeypatch) -> None:
@@ -146,6 +215,7 @@ def test_embedded_pack_mismatch_falls_through_to_disk_cache() -> None:
     cache_dir = Path(settings.cue_runtime_cache_dir) / "asa_default"
     cache_dir.mkdir(parents=True)
     (cache_dir / "listening.wav").write_bytes(b"RIFFcached")
+    _write_cache_manifest(cache_dir, "listening")
 
     service = CueService()
     clip = asyncio.run(service.get_cue("asa_default", "listening"))
