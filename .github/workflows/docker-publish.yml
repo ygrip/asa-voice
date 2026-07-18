@@ -10,14 +10,222 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
-  build-push:
+  # Release hosted lane (plan §13): generate the OpenAI cue pack, build the hosted target,
+  # assert no local-ML deps leaked in, smoke-test it end-to-end, then push explicit tags.
+  release-hosted:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install cue-generation dependencies (hosted)
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-cue-build-hosted.txt
+
+      - name: Generate + validate the hosted cue pack
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python scripts/generate_cues.py \
+            --provider openai --model "${OPENAI_TTS_MODEL:-tts-1}" --output build/cues
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build hosted image (local load, for smoke test)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: hosted
+          push: false
+          load: true
+          tags: asa-voice-hosted:release-candidate
+          cache-from: type=gha,scope=hosted
+          cache-to: type=gha,mode=max,scope=hosted
+
+      - name: Assert forbidden packages are absent
+        run: docker run --rm -i asa-voice-hosted:release-candidate python - < scripts/assert_hosted_deps_absent.py
+
+      - name: Start container and verify endpoints
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          docker run -d --name hosted-release -p 8090:8090 \
+            -e ASA_VOICE_MODE=hosted -e STT_PROVIDER=openai -e TTS_PROVIDER=openai \
+            -e OPENAI_API_KEY="$OPENAI_API_KEY" \
+            asa-voice-hosted:release-candidate
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8090/health >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -sf http://localhost:8090/health
+          curl -sf http://localhost:8090/models
+          curl -sf http://localhost:8090/cues
+          curl -sf -X POST http://localhost:8090/tts \
+            -H 'Content-Type: application/json' \
+            -d '{"text":"Release smoke test.","voiceId":"asa_default","format":"wav"}' -o /tmp/tts-smoke.wav
+          test -s /tmp/tts-smoke.wav
+
+      - name: Measure image size and container RSS
+        run: |
+          docker image inspect asa-voice-hosted:release-candidate --format 'image size: {{.Size}} bytes'
+          docker stats --no-stream --format 'rss: {{.MemUsage}}' hosted-release
+          docker rm -f hosted-release
+
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/setup-qemu-action@v3
+
+      - name: Push hosted tags
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: hosted
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-hosted
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-hosted
+          cache-from: type=gha,scope=hosted
+          cache-to: type=gha,mode=max,scope=hosted
+
+  # Release local lane (plan §13): generate the Pocket TTS cue pack, build the local target,
+  # smoke-test local providers end-to-end (no external API calls), then push explicit tags.
+  release-local:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install cue-generation dependencies (local)
+        run: |
+          pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.5.0" || pip install "torch>=2.5.0"
+          pip install -r requirements-cue-build-local.txt
+
+      - name: Generate + validate the local (Pocket TTS) cue pack
+        run: |
+          python scripts/generate_cues.py \
+            --provider pocket_tts --model pocket-low --output build/cues
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: local-cue-pack
+          path: build/cues
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build local image (local load, for smoke test)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: local
+          push: false
+          load: true
+          tags: asa-voice-local:release-candidate
+          cache-from: type=gha,scope=local
+          cache-to: type=gha,mode=max,scope=local
+
+      - name: Start container and verify endpoints
+        run: |
+          docker run -d --name local-release -p 8090:8090 \
+            -e ASA_VOICE_MODE=local -e STT_PROVIDER=faster_whisper -e TTS_PROVIDER=pocket_tts \
+            asa-voice-local:release-candidate
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8090/health >/dev/null; then break; fi
+            sleep 2
+          done
+          curl -sf http://localhost:8090/health
+          curl -sf http://localhost:8090/models
+          curl -sf http://localhost:8090/cues
+          curl -sf -X POST http://localhost:8090/tts \
+            -H 'Content-Type: application/json' \
+            -d '{"text":"Release smoke test.","voiceId":"asa_default","format":"wav"}' -o /tmp/tts-smoke.wav
+          test -s /tmp/tts-smoke.wav
+
+      - name: Measure image size and container RSS
+        run: |
+          docker image inspect asa-voice-local:release-candidate --format 'image size: {{.Size}} bytes'
+          docker stats --no-stream --format 'rss: {{.MemUsage}}' local-release
+          docker rm -f local-release
+
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/setup-qemu-action@v3
+
+      - name: Push local tags
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: local
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-local
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-local
+          cache-from: type=gha,scope=local
+          cache-to: type=gha,mode=max,scope=local
+
+  # Release hybrid lane: same dependency set as `local` (plan §12). Reuses the local lane's
+  # already-generated + validated cue pack rather than regenerating it. Versioned tag only - the
+  # plan does not define a floating `latest-hybrid` tag.
+  release-hybrid:
+    needs: release-local
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: local-cue-pack
+          path: build/cues
+
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -25,31 +233,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=tag
-            type=sha
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-
-      - name: Build and push multi-arch image
+      - name: Build hybrid image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
+          target: hybrid
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-hybrid
+          cache-from: type=gha,scope=local
+          cache-to: type=gha,mode=max,scope=local

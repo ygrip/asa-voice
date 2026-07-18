@@ -1,0 +1,5 @@
+# Local TTS profile add-on (setara-nx07.5): pocket-tts (Kyutai).
+# pocket-tts requires numpy>=2 and pulls torch>=2.5, scipy, huggingface-hub, etc.
+# torch itself is installed CPU-only by the Dockerfile before this file, to avoid the CUDA wheel.
+-r requirements-base.txt
+pocket-tts==2.1.0

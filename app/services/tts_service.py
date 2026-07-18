@@ -2,20 +2,11 @@ import io
 import logging
 
 import numpy as np
-import scipy.io.wavfile
 
 from app.config import settings
+from app.services import voice_catalog
 
 log = logging.getLogger("asa.tts")
-
-# Maps our stable voiceId → a Kyutai pocket-tts pre-made voice name. The /tts contract stays
-# engine-agnostic; this is the only pocket-tts-aware surface (swap here for another engine).
-# Full voice list: https://huggingface.co/kyutai/tts-voices
-VOICE_CATALOG = [
-    {"id": "asa_default", "label": "ASA Default (Anna)", "voiceRef": "anna"},
-    {"id": "asa_bright", "label": "ASA Bright (Eve)", "voiceRef": "eve"},
-    {"id": "asa_calm", "label": "ASA Calm (George)", "voiceRef": "george"},
-]
 
 
 class TtsSynthesisError(Exception):
@@ -36,7 +27,6 @@ class TtsService:
         # limit - left unpinned this oversubscribes the capped container and throttles every matmul.
         torch.set_num_threads(settings.tts_cpu_threads)
         self.model = TTSModel.load_model(lsd_decode_steps=settings.tts_lsd_decode_steps)
-        self._refs = {v["id"]: v["voiceRef"] for v in VOICE_CATALOG}
         self._states: dict[str, object] = {}
         # Compile once at startup so the first real request is hot (compilation itself is lazy — it
         # fires on the first forward pass, which the warmup synth below triggers).
@@ -55,13 +45,10 @@ class TtsService:
             pass
 
     def list_voices(self) -> list[dict]:
-        return [
-            {"id": v["id"], "label": v["label"], "model": settings.tts_default_model, "language": "en"}
-            for v in VOICE_CATALOG
-        ]
+        return voice_catalog.list_voices_for_provider("pocket_tts", settings.tts_default_model)
 
     def _resolve_ref(self, voice_id: str | None) -> str:
-        return self._refs.get(voice_id or settings.tts_default_voice, VOICE_CATALOG[0]["voiceRef"])
+        return voice_catalog.resolve_voice_ref(voice_id, "pocket_tts", settings.tts_default_voice)
 
     def _state_for(self, voice_ref: str):
         state = self._states.get(voice_ref)
@@ -77,6 +64,8 @@ class TtsService:
         return (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
 
     def synthesize(self, text: str, voice_id: str | None = None) -> bytes:
+        import scipy.io.wavfile  # module import stays cheap/testable without local TTS installed
+
         if len(text) > settings.tts_max_text_chars:
             text = text[: settings.tts_max_text_chars].rstrip()
         try:

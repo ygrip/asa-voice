@@ -471,7 +471,7 @@ def test_local_only_lifespan_never_runs_hosted_cleanup(
 
     monkeypatch.setattr(main, "cleanup_expired_openai_stt_files", unexpected_cleanup)
     monkeypatch.setattr(runtime, "load_local_stt_service", lambda: object())
-    monkeypatch.setattr(runtime, "load_tts_service", lambda: object())
+    monkeypatch.setattr(runtime, "load_local_tts_service", lambda: object())
     monkeypatch.setattr(runtime, "build_routers", lambda: None)
 
     async def exercise() -> None:
@@ -495,7 +495,7 @@ def test_hosted_lifespan_attempts_cleanup_but_survives_io_failure(
         raise OSError("read-only filesystem")
 
     monkeypatch.setattr(main, "cleanup_expired_openai_stt_files", failing_cleanup)
-    monkeypatch.setattr(runtime, "load_tts_service", lambda: object())
+    monkeypatch.setattr(runtime, "load_local_tts_service", lambda: object())
     monkeypatch.setattr(runtime, "build_routers", lambda: None)
 
     async def exercise() -> None:

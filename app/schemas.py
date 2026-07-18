@@ -69,8 +69,13 @@ class HealthSttInfo(BaseModel):
 class HealthTtsInfo(BaseModel):
     engine: str
     model: str
-    sampleRate: int
+    sampleRate: int | None = None
     provider: str
+    fallbackProvider: str | None = None
+    fallbackModel: str | None = None
+    localReady: bool
+    hostedReady: bool
+    fallbackReady: bool | None = None
     ready: bool
     warning: str | None = None
 
@@ -115,6 +120,11 @@ class TtsInfo(BaseModel):
     defaultVoice: str
     voices: list[VoiceInfo]
     activeProvider: str
+    fallbackProvider: str | None = None
+    fallbackModel: str | None = None
+    fallbackLoaded: bool | None = None
+    localLoaded: bool
+    hostedConfigured: bool
     availableProviders: list[str]
     supportedProviders: list[str]
 
@@ -129,3 +139,14 @@ class ModelsResponse(BaseModel):
 class ErrorResponse(BaseModel):
     error: str
     message: str = Field(default="")
+
+
+class CueInfo(BaseModel):
+    id: str
+    text: str
+    maxDurationMs: int
+
+
+class CuesResponse(BaseModel):
+    cues: list[CueInfo]
+    voiceIds: list[str]

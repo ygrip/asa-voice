@@ -1,0 +1,4 @@
+# Hosted profile (setara-nx07.5): OpenAI STT+TTS only.
+# No torch/pocket-tts/faster-whisper/ctranslate2/scipy - kept lean per plan §12.
+# scripts/assert_hosted_deps_absent.py asserts these stay absent from the built image.
+-r requirements-base.txt

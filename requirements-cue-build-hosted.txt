@@ -1,0 +1,4 @@
+# CI cue-generation lane, hosted (setara-nx07.5, plan §13 "Release hosted lane" step 2).
+# scripts/generate_cues.py --provider openai reuses OpenAiTtsAdapter, so this mirrors the hosted
+# runtime's dependency set 1:1 - no separate generator-only package set.
+-r requirements-hosted.txt

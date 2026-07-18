@@ -1,0 +1,5 @@
+# CI cue-generation lane, local (setara-nx07.5, plan §13 "Release local lane" step 1).
+# scripts/generate_cues.py --provider pocket_tts reuses PocketTtsAdapter/TtsService, so this
+# mirrors the local-tts runtime's dependency set 1:1 - no separate generator-only package set.
+# (torch is still installed CPU-only by the CI step itself, same as the local Docker target.)
+-r requirements-local-tts.txt

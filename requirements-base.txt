@@ -1,0 +1,13 @@
+# Shared deps needed by every runtime profile (hosted/local/hybrid) - setara-nx07.5.
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+# pocket-tts requires python-multipart>=0.0.21; STT file uploads need this regardless of provider.
+python-multipart>=0.0.21
+pydantic-settings==2.5.2
+# OpenAI hosted STT/TTS (setara-s94o.6, setara-nx07.2). Lightweight - no CUDA/ML pulls.
+openai==2.45.0
+# Cue/voice-catalog manifests (setara-nx07.3).
+PyYAML==6.0.3
+# app/providers/router.py does STT array math and type-hints with numpy regardless of which STT
+# provider is active, so this is needed even in the hosted-only profile.
+numpy>=2.0,<3

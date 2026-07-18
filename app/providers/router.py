@@ -5,14 +5,15 @@ adapter and passing it in here.
 
 Plan reference: asa-local-openai-hosted-mode-plan.md §6 (Provider Router).
 """
-from typing import Optional, Protocol
+from typing import AsyncIterator, Optional, Protocol
 
 import numpy as np
 
 from app.providers.base import (
     IN_MEMORY_AUDIO_MARKER, SttAdapter, SttOptions, SttResult, TtsAdapter, TtsOptions, TtsResult,
+    TtsStreamResult,
 )
-from app.providers.errors import SttFallbackEligibleError
+from app.providers.errors import SttFallbackEligibleError, TtsFallbackEligibleError
 from app.services.operation_limiter import OperationBusyError
 
 STT_STREAM_SAMPLE_RATE = 16000  # PCM16 mono @16kHz streaming contract
@@ -120,18 +121,86 @@ def _probe_file_duration_seconds(audio_path: str) -> Optional[float]:
 
 class TtsProviderRouter:
     """Selects a primary TTS adapter, falling back to a secondary one (if configured) when the
-    primary raises."""
+    primary raises TtsFallbackEligibleError. Any other exception (including TtsFailLoudError,
+    e.g. a bad API key or exhausted billing) propagates immediately — an unclassified TTS failure
+    must never be silently masked by a fallback attempt (plan §7 error classification)."""
 
     def __init__(self, primary: TtsAdapter, fallback: Optional[TtsAdapter] = None):
         self.primary = primary
         self.fallback = fallback
+        self._by_name: dict[str, TtsAdapter] = {}
+        for adapter in (primary, fallback):
+            if adapter is not None:
+                self._by_name[getattr(adapter, "provider_name", "")] = adapter
+
+    def resolve_provider(self, provider_name: str) -> Optional[TtsAdapter]:
+        return self._by_name.get(provider_name)
 
     async def synthesize(self, text: str, options: TtsOptions) -> TtsResult:
         try:
             return await self.primary.synthesize(text, options)
         except OperationBusyError:
             raise
-        except Exception as primary_error:
-            if not self.fallback:
-                raise primary_error
+        except TtsFallbackEligibleError as primary_error:
+            if not self.fallback or self.fallback is self.primary:
+                raise
             return await self.fallback.synthesize(text, options)
+
+    async def synthesize_stream(self, text: str, options: TtsOptions) -> TtsStreamResult:
+        """Fallback is only allowed before the first audio chunk is produced — once bytes are
+        committed to the caller, a mid-stream failure propagates instead of switching providers
+        (plan §6.5: never concatenate two provider voices in one response)."""
+        try:
+            return await self._synthesize_stream_primed(self.primary, text, options)
+        except OperationBusyError:
+            raise
+        except TtsFallbackEligibleError as primary_error:
+            if not self.fallback or self.fallback is self.primary:
+                raise
+            return await self._synthesize_stream_primed(self.fallback, text, options)
+
+    @staticmethod
+    async def _synthesize_stream_primed(
+        adapter: TtsAdapter, text: str, options: TtsOptions
+    ) -> TtsStreamResult:
+        """Fetch the adapter's stream result and force its first chunk now, so any failure that
+        happens before real audio bytes exist still raises here — where the caller above can still
+        fall back — instead of surfacing once the client is already mid-stream."""
+        result = await adapter.synthesize_stream(text, options)
+        result.chunks = await _prime_first_chunk(result.chunks)
+        return result
+
+
+async def _prime_first_chunk(chunks: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    iterator = chunks.__aiter__()
+    try:
+        first = await iterator.__anext__()
+    except StopAsyncIteration:
+        first = None
+    return _PrimedAsyncIterator(iterator, first)
+
+
+class _PrimedAsyncIterator:
+    """Replays an already-fetched `first_chunk` before resuming `rest`. `aclose()` always forwards
+    to `rest` — even if this wrapper's `__anext__` was never called — so a caller that discards an
+    unconsumed stream still deterministically triggers `rest`'s own cleanup (e.g. releasing a
+    concurrency lease held by an adapter's generator). A plain wrapper generator can't guarantee
+    this: aclose() on a generator that never started running never executes its body/finally, and
+    would instead depend on the event loop's async-generator GC finalizer to clean up `rest`."""
+
+    def __init__(self, rest: AsyncIterator[bytes], first_chunk: Optional[bytes]):
+        self._rest = rest
+        self._first_chunk = first_chunk
+        self._first_consumed = first_chunk is None
+
+    def __aiter__(self) -> "AsyncIterator[bytes]":
+        return self
+
+    async def __anext__(self) -> bytes:
+        if not self._first_consumed:
+            self._first_consumed = True
+            return self._first_chunk
+        return await self._rest.__anext__()
+
+    async def aclose(self) -> None:
+        await self._rest.aclose()

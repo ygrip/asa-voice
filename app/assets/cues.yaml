@@ -1,0 +1,18 @@
+version: 1
+
+cues:
+  listening:
+    text: "Yes?"
+    maxDurationMs: 1800
+
+  processing:
+    text: "Okay, working on it."
+    maxDurationMs: 3200
+
+  ok:
+    text: "Done."
+    maxDurationMs: 1800
+
+  sorry:
+    text: "Sorry, I didn't catch that."
+    maxDurationMs: 3200

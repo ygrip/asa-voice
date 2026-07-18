@@ -6,7 +6,7 @@ these shapes so routers/policy/observability never need to know which provider i
 Plan reference: asa-local-openai-hosted-mode-plan.md §5 (Provider Abstraction).
 """
 from dataclasses import dataclass, field
-from typing import List, Optional, Protocol
+from typing import AsyncIterator, List, Optional, Protocol
 
 # Sentinel audio_path passed to SttPolicy.validate_audio() by the file-free /stt/raw + streaming
 # array-based path, where there is no real file on disk to inspect.
@@ -53,6 +53,9 @@ class TtsOptions:
     format: str = "wav"
     request_id: Optional[str] = None
     client_id: Optional[str] = None
+    speed: Optional[float] = None
+    instructions: Optional[str] = None
+    purpose: str = "response"  # response | cue
 
 
 @dataclass
@@ -64,5 +67,29 @@ class TtsResult:
     latency_ms: int
 
 
+@dataclass
+class TtsAudioMetadata:
+    content_type: str
+    sample_rate: Optional[int]
+    channels: int
+    sample_format: Optional[str]
+    response_format: str
+
+
+@dataclass
+class TtsStreamResult:
+    provider: str
+    model: str
+    voice_id: Optional[str]
+    metadata: TtsAudioMetadata
+    chunks: AsyncIterator[bytes]
+
+
 class TtsAdapter(Protocol):
+    provider_name: str
+
     async def synthesize(self, text: str, options: TtsOptions) -> TtsResult: ...
+
+    async def synthesize_stream(self, text: str, options: TtsOptions) -> TtsStreamResult: ...
+
+    def list_voices(self) -> List[dict]: ...
