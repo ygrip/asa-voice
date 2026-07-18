@@ -1,0 +1,49 @@
+app/main.py
+  3e1b7f987a536b8e 65-75
+app/routers/health.py
+  3e1b7f987a536b8e 28-29,31,64-71,73-81,90-93,114,135-137,139-143,162,164,170-174,210-211,216-220,260-295
+app/config.py
+  3e1b7f987a536b8e 138-155
+app/providers/router.py
+  3e1b7f987a536b8e 16,124-126,144-146,157-159
+tests/test_provider_router_contract.py
+  3e1b7f987a536b8e 14,138-159,178,204-220,228-230,244
+app/schemas.py
+  3e1b7f987a536b8e 72,74-78,123-127
+tests/test_provider_aware_startup_health.py
+  3e1b7f987a536b8e 21-22,24-25,211,225-315
+app/runtime.py
+  3e1b7f987a536b8e 7,29-32,35-36,58-62,66-67,72-75,79-80,130-145,153-154,180-181,185-188,219-222
+tests/test_provider_config_contract.py
+  3e1b7f987a536b8e 29-30,58-76
+tests/test_openai_tts_contract.py
+  3e1b7f987a536b8e 1-304
+app/providers/openai_tts.py
+  3e1b7f987a536b8e 1-246
+.env.example
+  3e1b7f987a536b8e 6,31-44
+app/providers/errors.py
+  3e1b7f987a536b8e 1-2,7-10,26-34
+tests/test_openai_buffered_streaming.py
+  3e1b7f987a536b8e 474,498
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.23",
+  "base_commit_sha": "49aee7e7755a3e938bdd9d9f06e7cf938f9219a3",
+  "prompts": {
+    "3e1b7f987a536b8e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1cf910cc-4b39-446a-bba7-762faa923a03",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "ygrip <yunaz.gilang@gmail.com>",
+      "messages": [],
+      "total_additions": 941,
+      "total_deletions": 56,
+      "accepted_lines": 929,
+      "overriden_lines": 0
+    }
+  }
+}
