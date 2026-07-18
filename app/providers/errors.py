@@ -1,9 +1,13 @@
-"""Provider/policy error types shared by app/providers/router.py, the STT provider adapters, and
-the STT routers.
+"""Provider/policy error types shared by app/providers/router.py, the STT/TTS provider adapters,
+and their routers.
 
 - SttFallbackEligibleError / SttFailLoudError classify STT provider failures (setara-s94o.7):
   SttProviderRouter only falls back to a secondary provider on SttFallbackEligibleError; every
   other exception (including SttFailLoudError) propagates immediately with its message intact.
+- TtsFallbackEligibleError / TtsFailLoudError are the TTS equivalent (setara-nx07.2 / plan §7
+  Error classification): TtsProviderRouter only falls back on TtsFallbackEligibleError, so an
+  unclassified or fail-loud TTS error (bad key, billing, unsupported voice) never gets silently
+  masked by a fallback attempt.
 - SttPolicyRejectedError is raised by the policy layer (setara-s94o.9) before any provider is
   invoked. It carries the HTTP status the caller (routers/stt.py) should surface.
 """
@@ -17,6 +21,17 @@ class SttFallbackEligibleError(Exception):
 class SttFailLoudError(Exception):
     """Non-transient STT provider failure - must surface to the caller immediately, never
     silently fall back (e.g. invalid API key, billing/quota exhausted, unsupported file format)."""
+
+
+class TtsFallbackEligibleError(Exception):
+    """Transient/infra TTS provider failure - safe for TtsProviderRouter to retry against a
+    fallback provider (e.g. network timeout, provider 5xx, transient rate limiting)."""
+
+
+class TtsFailLoudError(Exception):
+    """Non-transient TTS provider failure - must surface to the caller immediately, never
+    silently fall back (e.g. invalid API key, billing/quota exhausted, unsupported voice, text
+    too long)."""
 
 
 class SttPolicyRejectedError(Exception):

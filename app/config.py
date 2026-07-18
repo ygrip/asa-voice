@@ -135,6 +135,24 @@ class Settings(BaseSettings):
         "release plan, coverage, rerun failed, automation coverage, squad, tribe."
     )
 
+    # OpenAI hosted TTS (setara-nx07.2). tts-1 is the speed-oriented default lane; tts-1-hd trades
+    # latency for quality. Model IDs stay configurable — hosted catalogs change without notice.
+    openai_tts_model: str = "tts-1"
+    openai_tts_voice: str = "alloy"
+    openai_tts_timeout_seconds: int = 30
+    openai_tts_speed: float = 1.0
+    openai_tts_instructions: str = ""
+    openai_tts_complete_format: str = "wav"
+    openai_tts_stream_format: str = "pcm"
+    openai_tts_max_text_chars: int = 2000
+
+    # Hosted TTS cost policy: separate concurrency ceiling from the local pocket_tts one
+    # (tts_max_concurrent/max_concurrent_tts below) since a hosted request is a billed network
+    # call, not a CPU-bound synth job - mirrors the STT local/hosted split
+    # (local_stt_max_concurrent vs hosted_stt_max_concurrent).
+    hosted_tts_max_concurrent: int = 4
+    max_tts_chars_per_client_per_day: int = 50_000
+
     # Policy layer v1 (setara-s94o.9) — request validation before any provider runs, plus an
     # in-memory per-client daily quota. File-size validation reuses the existing max_upload_mb.
     # Plan §10.2 recommends 30s/request, but /stt already supports long PTT dictation up to

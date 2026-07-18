@@ -11,7 +11,7 @@ import pytest
 from app.providers.base import (
     SttOptions, SttResult, TtsAudioMetadata, TtsOptions, TtsResult, TtsStreamResult,
 )
-from app.providers.errors import SttFallbackEligibleError
+from app.providers.errors import SttFallbackEligibleError, TtsFallbackEligibleError
 from app.providers.router import SttProviderRouter, TtsProviderRouter
 
 
@@ -135,6 +135,28 @@ def test_tts_router_raises_primary_error_when_fallback_is_none() -> None:
         asyncio.run(router.synthesize("hello", TtsOptions()))
 
 
+def test_tts_router_does_not_fall_back_on_non_fallback_eligible_error() -> None:
+    # e.g. a fail-loud auth/billing error must never be silently masked by a fallback.
+    primary = _FakeTtsAdapter(error=RuntimeError("bad api key"))
+    fallback = _FakeTtsAdapter(result=_tts_result())
+    router = TtsProviderRouter(primary=primary, fallback=fallback)
+
+    with pytest.raises(RuntimeError, match="bad api key"):
+        asyncio.run(router.synthesize("hello", TtsOptions()))
+    assert fallback.calls == 0
+
+
+def test_tts_router_falls_back_only_on_fallback_eligible_error() -> None:
+    primary = _FakeTtsAdapter(error=TtsFallbackEligibleError("transient failure"))
+    fallback = _FakeTtsAdapter(result=_tts_result(provider="pocket_tts"))
+    router = TtsProviderRouter(primary=primary, fallback=fallback)
+
+    result = asyncio.run(router.synthesize("hello", TtsOptions()))
+
+    assert result.provider == "pocket_tts"
+    assert fallback.calls == 1
+
+
 def _metadata() -> TtsAudioMetadata:
     return TtsAudioMetadata(
         content_type="audio/l16", sample_rate=24_000, channels=1,
@@ -153,7 +175,7 @@ class _FakeStreamingTtsAdapter:
 
     async def synthesize_stream(self, text, options) -> TtsStreamResult:
         if self._fail_before_first:
-            raise RuntimeError(f"{self.provider_name} unavailable")
+            raise TtsFallbackEligibleError(f"{self.provider_name} unavailable")
 
         async def _gen():
             for chunk in self._chunks:
@@ -179,6 +201,23 @@ def test_tts_router_stream_falls_back_before_first_chunk() -> None:
     asyncio.run(exercise())
 
 
+def test_tts_router_stream_does_not_fall_back_on_non_fallback_eligible_error() -> None:
+    class _FailsLoud:
+        provider_name = "openai"
+
+        async def synthesize_stream(self, text, options) -> TtsStreamResult:
+            raise RuntimeError("bad api key")
+
+    async def exercise() -> None:
+        fallback = _FakeStreamingTtsAdapter("pocket_tts", chunks=[b"x"])
+        router = TtsProviderRouter(primary=_FailsLoud(), fallback=fallback)
+
+        with pytest.raises(RuntimeError, match="bad api key"):
+            await router.synthesize_stream("hello", TtsOptions())
+
+    asyncio.run(exercise())
+
+
 def test_tts_router_stream_never_switches_provider_after_first_chunk() -> None:
     class _FailsAfterFirstChunk:
         provider_name = "openai"
@@ -186,7 +225,9 @@ def test_tts_router_stream_never_switches_provider_after_first_chunk() -> None:
         async def synthesize_stream(self, text, options) -> TtsStreamResult:
             async def _gen():
                 yield b"a"
-                raise RuntimeError("openai dropped mid-stream")
+                # Even a fallback-eligible-looking error must not trigger a provider switch once
+                # bytes are already committed to the caller.
+                raise TtsFallbackEligibleError("openai dropped mid-stream")
 
             return TtsStreamResult(
                 provider="openai", model="test", voice_id=options.voice_id,
@@ -200,7 +241,7 @@ def test_tts_router_stream_never_switches_provider_after_first_chunk() -> None:
         stream = await router.synthesize_stream("hello", TtsOptions())
         assert stream.provider == "openai"
 
-        with pytest.raises(RuntimeError, match="openai dropped mid-stream"):
+        with pytest.raises(TtsFallbackEligibleError, match="openai dropped mid-stream"):
             _ = [chunk async for chunk in stream.chunks]
 
     asyncio.run(exercise())

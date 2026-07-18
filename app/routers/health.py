@@ -25,7 +25,10 @@ class ComponentReadiness:
     hosted_stt_ready: bool
     stt_primary_ready: bool
     stt_fallback_ready: bool | None
+    local_tts_ready: bool
+    hosted_tts_ready: bool
     tts_ready: bool
+    tts_fallback_ready: bool | None
     stt_warning: str | None
     tts_warning: str | None
 
@@ -58,9 +61,24 @@ def component_readiness() -> ComponentReadiness:
     if settings.stt_provider == "openai" and not runtime.hosted_stt_config_usable():
         stt_warning = "OpenAI STT configuration is incomplete"
 
-    tts_ready = runtime.tts_service is not None and runtime.tts_router is not None
+    # TTS readiness is defined per-provider (plan §8), not by `runtime.tts_service != null` -
+    # a hosted-only OpenAI config never constructs tts_service at all.
+    local_tts_ready = runtime.tts_service is not None and runtime.has_tts_adapter("pocket_tts")
+    hosted_tts_ready = runtime.hosted_tts_config_usable() and runtime.has_tts_adapter("openai")
+    tts_primary_ready = _tts_provider_ready(settings.tts_provider, local_tts_ready, hosted_tts_ready)
+
+    tts_fallback_provider = _tts_fallback_provider()
+    tts_fallback_ready = None
     tts_warning = None
-    if not tts_ready:
+    if tts_fallback_provider is not None:
+        tts_fallback_ready = _tts_provider_ready(
+            tts_fallback_provider, local_tts_ready, hosted_tts_ready
+        )
+        if not tts_fallback_ready:
+            tts_warning = f"Configured TTS fallback {tts_fallback_provider} is unavailable"
+    if settings.tts_provider == "openai" and not runtime.hosted_tts_config_usable():
+        tts_warning = "OpenAI TTS configuration is incomplete"
+    if not tts_primary_ready and tts_warning is None:
         tts_warning = f"Configured TTS provider {settings.tts_provider} is unavailable"
 
     return ComponentReadiness(
@@ -69,7 +87,10 @@ def component_readiness() -> ComponentReadiness:
         hosted_stt_ready=hosted_ready,
         stt_primary_ready=primary_ready,
         stt_fallback_ready=fallback_ready,
-        tts_ready=tts_ready,
+        local_tts_ready=local_tts_ready,
+        hosted_tts_ready=hosted_tts_ready,
+        tts_ready=tts_primary_ready,
+        tts_fallback_ready=tts_fallback_ready,
         stt_warning=stt_warning,
         tts_warning=tts_warning,
     )
@@ -90,6 +111,7 @@ def health(response: Response) -> HealthResponse:
         health_status = "degraded"
 
     fallback_provider = _fallback_provider()
+    tts_fallback_provider = _tts_fallback_provider()
     return HealthResponse(
         status=health_status,
         mode=settings.asa_voice_mode,
@@ -110,10 +132,15 @@ def health(response: Response) -> HealthResponse:
             warning=readiness.stt_warning,
         ),
         tts=HealthTtsInfo(
-            engine=settings.tts_engine,
-            model=settings.tts_default_model,
-            sampleRate=settings.tts_sample_rate,
+            engine=_tts_engine(settings.tts_provider),
+            model=_tts_model(settings.tts_provider),
+            sampleRate=settings.tts_sample_rate if settings.tts_provider == "pocket_tts" else None,
             provider=settings.tts_provider,
+            fallbackProvider=tts_fallback_provider,
+            fallbackModel=_tts_model(tts_fallback_provider) if tts_fallback_provider else None,
+            localReady=readiness.local_tts_ready,
+            hostedReady=readiness.hosted_tts_ready,
+            fallbackReady=readiness.tts_fallback_ready,
             ready=readiness.tts_ready,
             warning=readiness.tts_warning,
         ),
@@ -132,14 +159,19 @@ def _stt_artifact_ready() -> bool | None:
 @router.get("/models", response_model=ModelsResponse)
 def models() -> ModelsResponse:
     readiness = component_readiness()
-    voices = runtime.tts_service.list_voices() if runtime.tts_service else []
+    voices = _tts_active_adapter_voices()
     fallback_provider = _fallback_provider()
+    tts_fallback_provider = _tts_fallback_provider()
     available_stt = [
         provider
         for provider in sorted(runtime.SUPPORTED_STT_PROVIDERS)
         if _provider_ready(provider, readiness.local_stt_ready, readiness.hosted_stt_ready)
     ]
-    available_tts = [settings.tts_provider] if readiness.tts_ready else []
+    available_tts = [
+        provider
+        for provider in sorted(runtime.SUPPORTED_TTS_PROVIDERS)
+        if _tts_provider_ready(provider, readiness.local_tts_ready, readiness.hosted_tts_ready)
+    ]
 
     return ModelsResponse(
         mode=settings.asa_voice_mode,
@@ -175,12 +207,17 @@ def models() -> ModelsResponse:
             supportedProviders=sorted(runtime.SUPPORTED_STT_PROVIDERS),
         ),
         tts=TtsInfo(
-            engine=settings.tts_engine,
-            activeModel=settings.tts_default_model,
+            engine=_tts_engine(settings.tts_provider),
+            activeModel=_tts_model(settings.tts_provider),
             loaded=readiness.tts_ready,
             defaultVoice=settings.tts_default_voice,
             voices=voices,
             activeProvider=settings.tts_provider,
+            fallbackProvider=tts_fallback_provider,
+            fallbackModel=_tts_model(tts_fallback_provider) if tts_fallback_provider else None,
+            fallbackLoaded=readiness.tts_fallback_ready,
+            localLoaded=readiness.local_tts_ready,
+            hostedConfigured=runtime.hosted_tts_config_usable(),
             availableProviders=available_tts,
             supportedProviders=sorted(runtime.SUPPORTED_TTS_PROVIDERS),
         ),
@@ -220,3 +257,39 @@ def _local_value(value: str, provider: str) -> str | None:
     if provider == "faster_whisper":
         return value
     return None
+
+
+def _tts_provider_ready(provider: str, local_ready: bool, hosted_ready: bool) -> bool:
+    if provider == "pocket_tts":
+        return local_ready
+    if provider == "openai":
+        return hosted_ready
+    return False
+
+
+def _tts_fallback_provider() -> str | None:
+    provider = settings.tts_fallback_provider
+    if provider == "none" or provider == settings.tts_provider:
+        return None
+    return provider
+
+
+def _tts_model(provider: str | None) -> str:
+    if provider == "openai":
+        return settings.openai_tts_model
+    if provider == "pocket_tts":
+        return settings.tts_default_model
+    return ""
+
+
+def _tts_engine(provider: str) -> str:
+    if provider == "pocket_tts":
+        return "pocket-tts"
+    return provider
+
+
+def _tts_active_adapter_voices() -> list[dict]:
+    if runtime.tts_router is None:
+        return []
+    adapter = runtime.tts_router.resolve_provider(settings.tts_provider) or runtime.tts_router.primary
+    return adapter.list_voices() if adapter else []

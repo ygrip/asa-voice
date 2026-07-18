@@ -62,12 +62,17 @@ async def lifespan(_app: FastAPI):
     else:
         log.info("Skipping local STT model; configured STT providers are hosted-only")
 
-    try:
-        log.info("Loading TTS engine %s", settings.tts_engine)
-        runtime.tts_service = runtime.load_tts_service()
-        log.info("TTS ready")
-    except Exception:
-        log.exception("TTS engine failed to load")
+    # Same reasoning as STT above, applied to Pocket TTS: its constructor imports torch and loads
+    # model weights, so hosted-only TTS configs must never construct it (plan §8).
+    if runtime.needs_local_tts():
+        try:
+            log.info("Loading TTS engine %s", settings.tts_engine)
+            runtime.tts_service = runtime.load_local_tts_service()
+            log.info("Local TTS ready")
+        except Exception:
+            log.exception("Local TTS engine failed to load")
+    else:
+        log.info("Skipping Pocket TTS; configured TTS providers are hosted-only")
 
     runtime.build_routers()
 

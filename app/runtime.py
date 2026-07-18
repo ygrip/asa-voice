@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from app.config import settings
-from app.providers.policy import RequestValidationPolicy
+from app.providers.policy import InMemoryDailyQuotaStore, RequestValidationPolicy
 from app.providers.router import SttProviderRouter, TtsProviderRouter
 from app.services.operation_limiter import OperationLimiter
 
@@ -26,8 +26,15 @@ tts_router: TtsProviderRouter | None = None
 # across requests instead of resetting every time build_routers() runs.
 stt_policy = RequestValidationPolicy()
 
+# Hosted TTS daily character quota (setara-nx07.2 / plan §7 cost policy). Reuses
+# InMemoryDailyQuotaStore's day-rollover counter for characters instead of seconds - the mechanism
+# is unit-agnostic despite the STT-era method name (used_seconds).
+tts_char_quota_store = InMemoryDailyQuotaStore()
 
-def _build_operation_limiters() -> tuple[OperationLimiter, OperationLimiter, OperationLimiter]:
+
+def _build_operation_limiters() -> tuple[
+    OperationLimiter, OperationLimiter, OperationLimiter, OperationLimiter
+]:
     return (
         OperationLimiter(
             settings.local_stt_max_concurrent
@@ -48,20 +55,29 @@ def _build_operation_limiters() -> tuple[OperationLimiter, OperationLimiter, Ope
             busy_code="TTS_BUSY",
             busy_message="TTS synthesis is busy - retry shortly",
         ),
+        OperationLimiter(
+            settings.hosted_tts_max_concurrent,
+            busy_code="TTS_HOSTED_BUSY",
+            busy_message="Hosted TTS request limit reached - retry shortly",
+        ),
     )
 
 
-local_decode_limiter, hosted_request_limiter, tts_limiter = _build_operation_limiters()
+local_decode_limiter, hosted_request_limiter, tts_limiter, hosted_tts_limiter = (
+    _build_operation_limiters()
+)
 
 
 def reset_operation_limiters() -> None:
-    global local_decode_limiter, hosted_request_limiter, tts_limiter
-    local_decode_limiter, hosted_request_limiter, tts_limiter = _build_operation_limiters()
+    global local_decode_limiter, hosted_request_limiter, tts_limiter, hosted_tts_limiter
+    local_decode_limiter, hosted_request_limiter, tts_limiter, hosted_tts_limiter = (
+        _build_operation_limiters()
+    )
 
 SUPPORTED_STT_PROVIDERS = {"faster_whisper", "openai"}
 SUPPORTED_STT_FALLBACK_PROVIDERS = {"none", "faster_whisper", "openai"}
-SUPPORTED_TTS_PROVIDERS = {"pocket_tts"}
-SUPPORTED_TTS_FALLBACK_PROVIDERS = {"none", "pocket_tts"}
+SUPPORTED_TTS_PROVIDERS = {"pocket_tts", "openai"}
+SUPPORTED_TTS_FALLBACK_PROVIDERS = {"none", "pocket_tts", "openai"}
 
 
 class UnsupportedProviderError(RuntimeError):
@@ -111,6 +127,22 @@ def hosted_stt_config_usable() -> bool:
     )
 
 
+def needs_local_tts() -> bool:
+    return settings.tts_provider == "pocket_tts" or settings.tts_fallback_provider == "pocket_tts"
+
+
+def needs_hosted_tts() -> bool:
+    return settings.tts_provider == "openai" or settings.tts_fallback_provider == "openai"
+
+
+def hosted_tts_config_usable() -> bool:
+    return bool(
+        settings.openai_api_key.strip()
+        and settings.openai_tts_model.strip()
+        and settings.openai_tts_timeout_seconds > 0
+    )
+
+
 def load_local_stt_service() -> SttService:
     """Import the local engine only when provider selection requires it."""
     from app.services.stt_service import SttService
@@ -118,7 +150,8 @@ def load_local_stt_service() -> SttService:
     return SttService()
 
 
-def load_tts_service() -> TtsService:
+def load_local_tts_service() -> TtsService:
+    """Import Pocket TTS only when provider selection requires it."""
     from app.services.tts_service import TtsService
 
     return TtsService()
@@ -141,12 +174,18 @@ def build_stt_adapter(provider: str, service: SttService | None):
 
 
 def build_tts_adapter(provider: str, service: TtsService | None):
-    if provider == "none" or service is None:
+    if provider == "none":
         return None
     if provider == "pocket_tts":
+        if service is None:
+            return None
         from app.providers.pocket_tts import PocketTtsAdapter
 
         return PocketTtsAdapter(service)
+    if provider == "openai":
+        from app.providers.openai_tts import OpenAiTtsAdapter
+
+        return OpenAiTtsAdapter()
     raise UnsupportedProviderError(f"TTS provider {provider!r} has no adapter yet")
 
 
@@ -175,6 +214,10 @@ def build_routers() -> None:
 
 def has_stt_adapter(provider: str) -> bool:
     return stt_router is not None and stt_router.resolve_provider(provider) is not None
+
+
+def has_tts_adapter(provider: str) -> bool:
+    return tts_router is not None and tts_router.resolve_provider(provider) is not None
 
 
 def reset_components() -> None:

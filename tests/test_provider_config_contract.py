@@ -26,8 +26,8 @@ def test_validate_provider_config_passes_for_default_settings() -> None:
     [
         ("stt_provider", "azure_speech"),
         ("stt_fallback_provider", "azure_speech"),
-        ("tts_provider", "openai"),
-        ("tts_fallback_provider", "openai"),
+        ("tts_provider", "elevenlabs"),
+        ("tts_fallback_provider", "elevenlabs"),
     ],
 )
 def test_validate_provider_config_fails_fast_on_unimplemented_provider(env_var, value) -> None:
@@ -55,3 +55,22 @@ def test_build_stt_adapter_builds_openai_adapter_without_a_local_service() -> No
 def test_build_stt_adapter_raises_for_unimplemented_provider() -> None:
     with pytest.raises(runtime.UnsupportedProviderError):
         runtime.build_stt_adapter("azure_speech", service=object())
+
+
+def test_build_tts_adapter_returns_none_for_none_provider() -> None:
+    assert runtime.build_tts_adapter("none", service=object()) is None
+
+
+def test_build_tts_adapter_returns_none_for_pocket_tts_without_a_service() -> None:
+    assert runtime.build_tts_adapter("pocket_tts", service=None) is None
+
+
+def test_build_tts_adapter_builds_openai_adapter_without_a_local_service() -> None:
+    # openai is a hosted provider - it must not require the local Pocket TTS TtsService.
+    adapter = runtime.build_tts_adapter("openai", service=None)
+    assert adapter.provider_name == "openai"
+
+
+def test_build_tts_adapter_raises_for_unimplemented_provider() -> None:
+    with pytest.raises(runtime.UnsupportedProviderError):
+        runtime.build_tts_adapter("elevenlabs", service=object())

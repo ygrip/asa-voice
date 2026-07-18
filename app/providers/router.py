@@ -13,7 +13,7 @@ from app.providers.base import (
     IN_MEMORY_AUDIO_MARKER, SttAdapter, SttOptions, SttResult, TtsAdapter, TtsOptions, TtsResult,
     TtsStreamResult,
 )
-from app.providers.errors import SttFallbackEligibleError
+from app.providers.errors import SttFallbackEligibleError, TtsFallbackEligibleError
 from app.services.operation_limiter import OperationBusyError
 
 STT_STREAM_SAMPLE_RATE = 16000  # PCM16 mono @16kHz streaming contract
@@ -121,7 +121,9 @@ def _probe_file_duration_seconds(audio_path: str) -> Optional[float]:
 
 class TtsProviderRouter:
     """Selects a primary TTS adapter, falling back to a secondary one (if configured) when the
-    primary raises."""
+    primary raises TtsFallbackEligibleError. Any other exception (including TtsFailLoudError,
+    e.g. a bad API key or exhausted billing) propagates immediately — an unclassified TTS failure
+    must never be silently masked by a fallback attempt (plan §7 error classification)."""
 
     def __init__(self, primary: TtsAdapter, fallback: Optional[TtsAdapter] = None):
         self.primary = primary
@@ -139,9 +141,9 @@ class TtsProviderRouter:
             return await self.primary.synthesize(text, options)
         except OperationBusyError:
             raise
-        except Exception as primary_error:
-            if not self.fallback:
-                raise primary_error
+        except TtsFallbackEligibleError as primary_error:
+            if not self.fallback or self.fallback is self.primary:
+                raise
             return await self.fallback.synthesize(text, options)
 
     async def synthesize_stream(self, text: str, options: TtsOptions) -> TtsStreamResult:
@@ -152,9 +154,9 @@ class TtsProviderRouter:
             return await self._synthesize_stream_primed(self.primary, text, options)
         except OperationBusyError:
             raise
-        except Exception as primary_error:
-            if not self.fallback:
-                raise primary_error
+        except TtsFallbackEligibleError as primary_error:
+            if not self.fallback or self.fallback is self.primary:
+                raise
             return await self._synthesize_stream_primed(self.fallback, text, options)
 
     @staticmethod

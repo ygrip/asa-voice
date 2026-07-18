@@ -18,7 +18,11 @@ class _SttAdapter:
 
 
 class _TtsAdapter:
-    provider_name = "pocket_tts"
+    def __init__(self, provider_name: str = "pocket_tts") -> None:
+        self.provider_name = provider_name
+
+    def list_voices(self) -> list[dict]:
+        return []
 
 
 class _TtsService:
@@ -204,7 +208,7 @@ def test_hosted_lifespan_never_constructs_local_stt(monkeypatch: pytest.MonkeyPa
         runtime.tts_router = TtsProviderRouter(primary=_TtsAdapter())
 
     monkeypatch.setattr(runtime, "load_local_stt_service", fail_if_local_stt_is_constructed)
-    monkeypatch.setattr(runtime, "load_tts_service", _TtsService)
+    monkeypatch.setattr(runtime, "load_local_tts_service", _TtsService)
     monkeypatch.setattr(runtime, "build_routers", build_fake_routers)
 
     async def exercise_lifespan() -> None:
@@ -216,6 +220,97 @@ def test_hosted_lifespan_never_constructs_local_stt(monkeypatch: pytest.MonkeyPa
     asyncio.run(exercise_lifespan())
     assert local_constructions == 0
     assert runtime.stt_service is None
+
+
+@pytest.mark.parametrize(
+    ("primary", "fallback", "expected"),
+    [
+        ("pocket_tts", "none", True),
+        ("openai", "pocket_tts", True),
+        ("openai", "none", False),
+    ],
+)
+def test_local_tts_requirement_follows_provider_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    primary: str,
+    fallback: str,
+    expected: bool,
+) -> None:
+    monkeypatch.setattr(settings, "tts_provider", primary)
+    monkeypatch.setattr(settings, "tts_fallback_provider", fallback)
+    assert runtime.needs_local_tts() is expected
+
+
+def test_hosted_tts_health_is_ready_without_pocket_tts(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_provider_settings(monkeypatch, "hosted", "openai", "none", api_key="sk-hosted")
+    monkeypatch.setattr(settings, "tts_provider", "openai")
+    monkeypatch.setattr(settings, "tts_fallback_provider", "none")
+    runtime.stt_router = SttProviderRouter(primary=_SttAdapter("openai"))
+    runtime.tts_router = TtsProviderRouter(primary=_TtsAdapter("openai"))
+
+    response = Response()
+    payload = health.health(response)
+
+    assert response.status_code == status.HTTP_200_OK
+    assert payload.ttsLoaded is True
+    assert payload.tts.ready is True
+    assert payload.tts.localReady is False
+    assert payload.tts.hostedReady is True
+    assert runtime.tts_service is None
+
+    hosted_models = health.models()
+    assert hosted_models.tts.activeProvider == "openai"
+    assert hosted_models.tts.hostedConfigured is True
+    assert hosted_models.tts.localLoaded is False
+    assert hosted_models.tts.availableProviders == ["openai"]
+
+
+def test_hosted_tts_health_rejects_incomplete_openai_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_provider_settings(monkeypatch, "hosted", "openai", "none", api_key="sk-hosted")
+    monkeypatch.setattr(settings, "tts_provider", "openai")
+    monkeypatch.setattr(settings, "tts_fallback_provider", "none")
+    monkeypatch.setattr(settings, "openai_tts_model", "")
+    runtime.stt_router = SttProviderRouter(primary=_SttAdapter("openai"))
+    runtime.tts_router = TtsProviderRouter(primary=_TtsAdapter("openai"))
+
+    response = Response()
+    payload = health.health(response)
+
+    assert payload.tts.ready is False
+    assert payload.tts.hostedReady is False
+    assert payload.tts.warning == "OpenAI TTS configuration is incomplete"
+
+
+def test_hosted_tts_lifespan_never_constructs_pocket_tts(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_provider_settings(monkeypatch, "hosted", "openai", "none", api_key="sk-hosted")
+    monkeypatch.setattr(settings, "tts_provider", "openai")
+    monkeypatch.setattr(settings, "tts_fallback_provider", "none")
+    local_constructions = 0
+
+    def fail_if_pocket_tts_is_constructed():
+        nonlocal local_constructions
+        local_constructions += 1
+        raise AssertionError("hosted-only startup must not construct Pocket TTS")
+
+    def build_fake_routers() -> None:
+        runtime.stt_router = SttProviderRouter(primary=_SttAdapter("openai"))
+        runtime.tts_router = TtsProviderRouter(primary=_TtsAdapter("openai"))
+
+    monkeypatch.setattr(runtime, "load_local_stt_service", lambda: object())
+    monkeypatch.setattr(runtime, "load_local_tts_service", fail_if_pocket_tts_is_constructed)
+    monkeypatch.setattr(runtime, "build_routers", build_fake_routers)
+
+    async def exercise_lifespan() -> None:
+        async with main.lifespan(FastAPI()):
+            assert local_constructions == 0
+            assert runtime.tts_service is None
+            assert health.component_readiness().tts_ready is True
+
+    asyncio.run(exercise_lifespan())
+    assert local_constructions == 0
+    assert runtime.tts_service is None
 
 
 def test_hosted_main_import_does_not_load_faster_whisper_modules() -> None:
