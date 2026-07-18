@@ -11,17 +11,8 @@ from openai import AsyncOpenAI
 from app.config import settings
 from app.providers.base import TtsAudioMetadata, TtsOptions, TtsResult, TtsStreamResult
 from app.providers.errors import TtsFailLoudError, TtsFallbackEligibleError
-from app.services import audio_service
+from app.services import audio_service, voice_catalog
 from app.services.operation_limiter import OperationBusyError
-
-# Interim stable-ASA-voice -> OpenAI-voice map (plan §5 voice catalog example). Superseded by the
-# shared app/assets/voice-catalog.yaml resolver once the cue-migration PR (setara-nx07.3) lands —
-# kept here, not duplicated, once that resolver exists.
-_VOICE_REFS = {
-    "asa_default": "alloy",
-    "asa_bright": "shimmer",
-    "asa_calm": "sage",
-}
 
 # OpenAI's `response_format=pcm` stream is documented as 24kHz mono 16-bit signed little-endian for
 # tts-1/tts-1-hd. Not guessed at random - but plan §7 requires this be confirmed by a live
@@ -34,7 +25,10 @@ _MODELS_SUPPORTING_INSTRUCTIONS = {"gpt-4o-mini-tts"}
 
 
 def _resolve_voice_ref(voice_id: str | None) -> str:
-    return _VOICE_REFS.get(voice_id or settings.openai_tts_voice, settings.openai_tts_voice)
+    try:
+        return voice_catalog.resolve_voice_ref(voice_id, "openai", settings.tts_default_voice)
+    except voice_catalog.UnknownVoiceError:
+        return settings.openai_tts_voice
 
 
 class OpenAiTtsAdapter:
@@ -138,10 +132,7 @@ class OpenAiTtsAdapter:
         )
 
     def list_voices(self) -> list[dict]:
-        return [
-            {"id": voice_id, "label": voice_id.replace("_", " ").title(), "model": self.model, "language": "en"}
-            for voice_id in _VOICE_REFS
-        ]
+        return voice_catalog.list_voices_for_provider("openai", self.model)
 
 
 def _validate_text_length(text: str) -> None:

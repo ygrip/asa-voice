@@ -1,0 +1,29 @@
+version: 1
+
+voices:
+  - id: asa_default
+    label: ASA Default
+    language: en
+    providers:
+      pocket_tts:
+        voice: anna
+      openai:
+        voice: alloy
+
+  - id: asa_bright
+    label: ASA Bright
+    language: en
+    providers:
+      pocket_tts:
+        voice: eve
+      openai:
+        voice: shimmer
+
+  - id: asa_calm
+    label: ASA Calm
+    language: en
+    providers:
+      pocket_tts:
+        voice: george
+      openai:
+        voice: sage

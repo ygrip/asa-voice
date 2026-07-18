@@ -214,6 +214,15 @@ class Settings(BaseSettings):
 
     tmp_dir: str = "/tmp/asa-voice"
 
+    # Cue service (setara-nx07.3, plan §9-§10): asa-voice owns cue audio, setara-core only proxies.
+    # cue_embedded_pack_dir is populated at build time by the generator (setara-nx07.4) - absent
+    # pre-PR4, so lookups there simply miss and fall through to runtime cache/regeneration below.
+    cue_embedded_pack_dir: str = "app/generated/cues"
+    cue_runtime_cache_dir: str = "/tmp/asa-voice/cues"
+    cue_pack_strict_match: bool = True
+    cue_runtime_regeneration: bool = False
+    cue_pack_mismatch_policy: str = "fail"  # fail | degraded | regenerate | ignore
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     def local_stt_concurrency_limit(self) -> int:

@@ -139,3 +139,14 @@ class ModelsResponse(BaseModel):
 class ErrorResponse(BaseModel):
     error: str
     message: str = Field(default="")
+
+
+class CueInfo(BaseModel):
+    id: str
+    text: str
+    maxDurationMs: int
+
+
+class CuesResponse(BaseModel):
+    cues: list[CueInfo]
+    voiceIds: list[str]

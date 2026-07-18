@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from app import runtime
 from app.auth import _get_clients
 from app.config import settings
-from app.routers import health, stt, tts
+from app.routers import cues, health, stt, tts
 from app.services.temp_audio_cleanup import cleanup_expired_openai_stt_files
 
 # LOG_LEVEL=DEBUG surfaces the per-session STT timeline/decode diagnostics added for setara-s94o
@@ -93,3 +93,4 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.include_router(health.router)
 app.include_router(stt.router)
 app.include_router(tts.router)
+app.include_router(cues.router)

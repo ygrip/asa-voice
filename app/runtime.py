@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from app.config import settings
 from app.providers.policy import InMemoryDailyQuotaStore, RequestValidationPolicy
 from app.providers.router import SttProviderRouter, TtsProviderRouter
+from app.services.cue_service import CueService
 from app.services.operation_limiter import OperationLimiter
 
 if TYPE_CHECKING:
@@ -30,6 +31,10 @@ stt_policy = RequestValidationPolicy()
 # InMemoryDailyQuotaStore's day-rollover counter for characters instead of seconds - the mechanism
 # is unit-agnostic despite the STT-era method name (used_seconds).
 tts_char_quota_store = InMemoryDailyQuotaStore()
+
+# Shared for the process lifetime so the in-memory/disk cue cache tiers (setara-nx07.3) persist
+# across requests instead of resetting every time build_routers() runs.
+cue_service = CueService()
 
 
 def _build_operation_limiters() -> tuple[
