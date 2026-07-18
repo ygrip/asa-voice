@@ -1,2 +1,5 @@
--r requirements.txt
+# Dev/test env (setara-nx07.5): needs every provider's deps so the full test suite can run,
+# including faster-whisper- and pocket-tts-touching tests.
+-r requirements-local-stt.txt
+-r requirements-local-tts.txt
 pytest>=8.3,<9

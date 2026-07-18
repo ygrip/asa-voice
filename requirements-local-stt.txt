@@ -1,0 +1,4 @@
+# Local STT profile add-on (setara-nx07.5): faster-whisper.
+# faster-whisper 1.1.x supports numpy 2 (1.0.x pinned numpy<2, conflicting with pocket-tts).
+-r requirements-base.txt
+faster-whisper==1.1.1

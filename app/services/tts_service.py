@@ -2,7 +2,6 @@ import io
 import logging
 
 import numpy as np
-import scipy.io.wavfile
 
 from app.config import settings
 from app.services import voice_catalog
@@ -65,6 +64,8 @@ class TtsService:
         return (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
 
     def synthesize(self, text: str, voice_id: str | None = None) -> bytes:
+        import scipy.io.wavfile  # module import stays cheap/testable without local TTS installed
+
         if len(text) > settings.tts_max_text_chars:
             text = text[: settings.tts_max_text_chars].rstrip()
         try:

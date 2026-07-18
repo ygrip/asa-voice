@@ -32,3 +32,84 @@ jobs:
 
       - name: Run tests
         run: python -m pytest tests/ -v --tb=short
+
+  build-hosted:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build hosted target
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: hosted
+          push: false
+          load: true
+          tags: asa-voice-sidecar:ci-hosted
+          cache-from: type=gha,scope=hosted
+          cache-to: type=gha,mode=max,scope=hosted
+
+      - name: Assert forbidden packages are absent
+        run: docker run --rm -i asa-voice-sidecar:ci-hosted python - < scripts/assert_hosted_deps_absent.py
+
+      - name: Smoke-test hosted container (no production API calls)
+        run: |
+          docker run -d --name hosted-smoke -p 8090:8090 \
+            -e ASA_VOICE_MODE=hosted -e STT_PROVIDER=openai -e TTS_PROVIDER=openai \
+            -e OPENAI_API_KEY=sk-ci-placeholder \
+            asa-voice-sidecar:ci-hosted
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8090/health >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -sf http://localhost:8090/health
+          curl -sf http://localhost:8090/models
+          curl -sf http://localhost:8090/cues
+          docker logs hosted-smoke
+          docker rm -f hosted-smoke
+
+  build-local:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for local-profile-relevant changes
+        id: filter
+        run: |
+          BASE="${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only "$BASE" HEAD -- Dockerfile 'requirements-base.txt' 'requirements-local-*.txt' app/ scripts/ | grep -q .; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.filter.outputs.changed == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build local target
+        if: steps.filter.outputs.changed == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: local
+          push: false
+          load: true
+          tags: asa-voice-sidecar:ci-local
+          cache-from: type=gha,scope=local
+          cache-to: type=gha,mode=max,scope=local
+
+      - name: Verify local-only dependencies import
+        if: steps.filter.outputs.changed == 'true'
+        run: |
+          docker run --rm asa-voice-sidecar:ci-local python -c \
+            "import torch, pocket_tts, faster_whisper, ctranslate2, scipy; print('local deps ok')"
