@@ -29,6 +29,18 @@ def _make_wav_bytes(duration_ms: int = 500, sample_rate: int = 24_000, channels:
     return buf.getvalue()
 
 
+def _make_streaming_placeholder_wav_bytes(duration_ms: int = 500, sample_rate: int = 24_000) -> bytes:
+    """Mono 16-bit WAV whose data-chunk size field is the 0xFFFFFFFF streaming placeholder OpenAI's
+    TTS API actually emits, instead of the true byte length - reproduces the CI failure where
+    wave.getnframes() trusted that field and computed a ~24-day duration for every real cue."""
+    frame_count = int(sample_rate * duration_ms / 1000)
+    samples = struct.pack(f"<{frame_count}h", *([1000] * frame_count))
+    fmt_chunk = struct.pack("<4sIHHIIHH", b"fmt ", 16, 1, 1, sample_rate, sample_rate * 2, 2, 16)
+    data_header = struct.pack("<4sI", b"data", 0xFFFFFFFF)
+    riff_body = b"WAVE" + fmt_chunk + data_header + samples
+    return struct.pack("<4sI", b"RIFF", len(riff_body)) + riff_body
+
+
 class _FakeAdapter:
     def __init__(self, audio_bytes: bytes | None = None):
         self._audio_bytes = audio_bytes or _make_wav_bytes()
@@ -127,6 +139,12 @@ def test_validate_wav_file_rejects_unexpected_sample_rate(tmp_path) -> None:
     assert any("sample rate" in e for e in errors)
 
 
+def test_validate_wav_file_ignores_a_bogus_streaming_placeholder_data_chunk_size(tmp_path) -> None:
+    path = tmp_path / "openai_quirk.wav"
+    path.write_bytes(_make_streaming_placeholder_wav_bytes(duration_ms=500))
+    assert generate_cues.validate_wav_file(path, max_duration_ms=1800) == []
+
+
 def test_validate_wav_file_rejects_clip_exceeding_max_duration(tmp_path) -> None:
     path = tmp_path / "too_long.wav"
     path.write_bytes(_make_wav_bytes(duration_ms=5000))
@@ -158,6 +176,24 @@ def test_generate_writes_a_clip_per_voice_and_cue(tmp_path, monkeypatch) -> None
     assert (tmp_path / "cue-pack.json").is_file()
     assert (tmp_path / "asa_default" / "listening.wav").is_file()
     assert len(fake.calls) == 12  # 3 voices x 4 cues
+
+
+def test_generate_records_a_sane_duration_when_the_provider_writes_a_streaming_placeholder(
+    tmp_path, monkeypatch
+) -> None:
+    fake = _FakeAdapter(audio_bytes=_make_streaming_placeholder_wav_bytes(duration_ms=500))
+    monkeypatch.setattr(generate_cues, "build_adapter", lambda provider: fake)
+
+    manifest = asyncio.run(
+        generate_cues.generate(
+            provider="openai", model="tts-1", voice_profile="default", speed=1.0,
+            instructions=None, output_format="wav", out_dir=tmp_path,
+        )
+    )
+
+    duration_ms = manifest["files"]["asa_default/listening.wav"]["durationMs"]
+    assert 400 <= duration_ms <= 600
+    assert generate_cues.validate_pack(tmp_path, manifest) == []
 
 
 def test_generate_records_correct_provider_voice_ref_per_file(tmp_path, monkeypatch) -> None:
